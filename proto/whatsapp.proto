@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package whatsapp;
+
+service WhatsAppBridge {
+  rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
+  rpc GetStatus (Empty) returns (StatusResponse);
+  rpc StreamEvents (Empty) returns (stream WhatsAppEvent);
+}
+
+message Empty {}
+
+message SendMessageRequest {
+  string tenant_id = 1;
+  string to = 2;
+  string body = 3;
+  string idempotency_key = 4;
+}
+
+message SendMessageResponse {
+  string message_id = 1;
+  string status = 2;
+}
+
+message StatusResponse {
+  string state = 1;
+}
+
+message WhatsAppEvent {
+  string type = 1;
+  string payload_json = 2;
+}
+

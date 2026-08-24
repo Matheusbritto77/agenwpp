@@ -1,0 +1,28 @@
+{
+  "name": "agenwpp",
+  "version": "1.0.0",
+  "description": "WhatsApp gateway based on Baileys with gRPC integration.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "grpc": "node src/grpc/server.js",
+    "lint": "node --check src/index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "grpc",
+    "automation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "dotenv": "^17.4.2",
+    "pino": "^10.3.1"
+  }
+}

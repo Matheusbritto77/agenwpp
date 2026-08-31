@@ -135,7 +135,6 @@ export async function startGrpcServer({ port = 50051 } = {}) {
           return;
         }
 
-        server.start();
         resolve(boundPort);
       }
     );

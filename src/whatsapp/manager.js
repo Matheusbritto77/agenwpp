@@ -335,20 +335,56 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
     };
   }
 
-  // Format destination jid
-  let jid = to.replace(/\D/g, '');
-  if (!jid.includes('@s.whatsapp.net')) {
-    jid = `${jid}@s.whatsapp.net`;
+  const cleanNumber = to.replace(/\D/g, '');
+  if (!cleanNumber) {
+    return {
+      message_id: '',
+      status: 'error',
+      error: 'Número de telefone inválido.',
+    };
   }
 
+  let targetJid = cleanNumber.includes('@') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`;
+
+  // 🔎 Automatically query WhatsApp server for the exact registered JID (handling Brazilian 9th digit)
   try {
-    const result = await sessionObj.sock.sendMessage(jid, { text: body });
+    const check = await sessionObj.sock.onWhatsApp(cleanNumber);
+    if (check && check.length > 0 && check[0].exists) {
+      targetJid = check[0].jid;
+    } else if (cleanNumber.startsWith('55') && cleanNumber.length === 13) {
+      // Try without 9th digit (55 + DDD + 8 digits)
+      const without9 = cleanNumber.slice(0, 4) + cleanNumber.slice(5);
+      const checkWithout9 = await sessionObj.sock.onWhatsApp(without9);
+      if (checkWithout9 && checkWithout9.length > 0 && checkWithout9[0].exists) {
+        targetJid = checkWithout9[0].jid;
+      }
+    } else if (cleanNumber.startsWith('55') && cleanNumber.length === 12) {
+      // Try with 9th digit (55 + DDD + 9 + 8 digits)
+      const with9 = cleanNumber.slice(0, 4) + '9' + cleanNumber.slice(4);
+      const checkWith9 = await sessionObj.sock.onWhatsApp(with9);
+      if (checkWith9 && checkWith9.length > 0 && checkWith9[0].exists) {
+        targetJid = checkWith9[0].jid;
+      }
+    }
+  } catch (checkErr) {
+    console.warn('[onWhatsApp check warning]', checkErr.message);
+  }
+
+  console.log(`[WhatsApp] Sending message to ${targetJid} (tenant: ${tenantId}): "${body}"`);
+
+  try {
+    const result = await sessionObj.sock.sendMessage(targetJid, { text: body });
+    const messageId = result?.key?.id || idempotencyKey || `${Date.now()}`;
+    console.log(`[WhatsApp] Message successfully delivered to server! ID: ${messageId}`);
+
     return {
-      message_id: result?.key?.id || idempotencyKey || `${Date.now()}`,
+      message_id: messageId,
       status: 'sent',
+      target_jid: targetJid,
       error: '',
     };
   } catch (err) {
+    console.error(`[WhatsApp] Send message error to ${targetJid}:`, err.message);
     return {
       message_id: '',
       status: 'failed',

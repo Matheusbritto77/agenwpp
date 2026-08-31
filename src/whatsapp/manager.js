@@ -1,6 +1,7 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
+  jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import pino from 'pino';
@@ -346,31 +347,49 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
 
   let targetJid = cleanNumber.includes('@') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`;
 
-  // 🔎 Automatically query WhatsApp server for the exact registered JID (handling Brazilian 9th digit)
-  try {
-    const check = await sessionObj.sock.onWhatsApp(cleanNumber);
-    if (check && check.length > 0 && check[0].exists) {
-      targetJid = check[0].jid;
-    } else if (cleanNumber.startsWith('55') && cleanNumber.length === 13) {
-      // Try without 9th digit (55 + DDD + 8 digits)
-      const without9 = cleanNumber.slice(0, 4) + cleanNumber.slice(5);
-      const checkWithout9 = await sessionObj.sock.onWhatsApp(without9);
-      if (checkWithout9 && checkWithout9.length > 0 && checkWithout9[0].exists) {
-        targetJid = checkWithout9[0].jid;
+  // 📱 Detect Self-Chat / Mensagem para si mesmo (número próprio)
+  const myJid = sessionObj.sock.user?.id ? jidNormalizedUser(sessionObj.sock.user.id) : null;
+  const myPhoneNumber = sessionObj.phoneNumber || (sessionObj.sock.user?.id ? sessionObj.sock.user.id.split(':')[0].split('@')[0] : '');
+
+  const isSelf = Boolean(
+    myPhoneNumber && (
+      cleanNumber === myPhoneNumber ||
+      myPhoneNumber.endsWith(cleanNumber) ||
+      cleanNumber.endsWith(myPhoneNumber) ||
+      (myJid && targetJid === myJid)
+    )
+  );
+
+  if (isSelf && myJid) {
+    targetJid = myJid;
+    console.log(`[WhatsApp] Self-message detected! Sending directly to own JID: ${targetJid}`);
+  } else {
+    // 🔎 Automatically query WhatsApp server for the exact registered JID (handling Brazilian 9th digit)
+    try {
+      const check = await sessionObj.sock.onWhatsApp(cleanNumber);
+      if (check && check.length > 0 && check[0].exists) {
+        targetJid = check[0].jid;
+      } else if (cleanNumber.startsWith('55') && cleanNumber.length === 13) {
+        // Try without 9th digit (55 + DDD + 8 digits)
+        const without9 = cleanNumber.slice(0, 4) + cleanNumber.slice(5);
+        const checkWithout9 = await sessionObj.sock.onWhatsApp(without9);
+        if (checkWithout9 && checkWithout9.length > 0 && checkWithout9[0].exists) {
+          targetJid = checkWithout9[0].jid;
+        }
+      } else if (cleanNumber.startsWith('55') && cleanNumber.length === 12) {
+        // Try with 9th digit (55 + DDD + 9 + 8 digits)
+        const with9 = cleanNumber.slice(0, 4) + '9' + cleanNumber.slice(4);
+        const checkWith9 = await sessionObj.sock.onWhatsApp(with9);
+        if (checkWith9 && checkWith9.length > 0 && checkWith9[0].exists) {
+          targetJid = checkWith9[0].jid;
+        }
       }
-    } else if (cleanNumber.startsWith('55') && cleanNumber.length === 12) {
-      // Try with 9th digit (55 + DDD + 9 + 8 digits)
-      const with9 = cleanNumber.slice(0, 4) + '9' + cleanNumber.slice(4);
-      const checkWith9 = await sessionObj.sock.onWhatsApp(with9);
-      if (checkWith9 && checkWith9.length > 0 && checkWith9[0].exists) {
-        targetJid = checkWith9[0].jid;
-      }
+    } catch (checkErr) {
+      console.warn('[onWhatsApp check warning]', checkErr.message);
     }
-  } catch (checkErr) {
-    console.warn('[onWhatsApp check warning]', checkErr.message);
   }
 
-  console.log(`[WhatsApp] Sending message to ${targetJid} (tenant: ${tenantId}): "${body}"`);
+  console.log(`[WhatsApp] Sending message to ${targetJid} (tenant: ${tenantId}, isSelf: ${isSelf}): "${body}"`);
 
   try {
     const result = await sessionObj.sock.sendMessage(targetJid, { text: body });

@@ -72,4 +72,22 @@ export async function initDbTables() {
       INDEX idx_tenant (tenant_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS whatsapp_logs (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+      direction VARCHAR(20) NOT NULL DEFAULT 'outbound',
+      phone VARCHAR(64) NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'sent',
+      message_id VARCHAR(191) NULL,
+      message_body LONGTEXT NULL,
+      error_message LONGTEXT NULL,
+      metadata JSON NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_tenant_status (tenant_id, status),
+      INDEX idx_phone (phone),
+      INDEX idx_created_at (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
 }

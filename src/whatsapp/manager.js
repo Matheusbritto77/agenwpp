@@ -7,6 +7,7 @@ import QRCode from 'qrcode';
 import pino from 'pino';
 import { useMySQLAuthState, clearSessionCredentials } from '../db/mysql-auth-state.js';
 import { getDbPool } from '../db/connection.js';
+import { logWhatsAppEvent } from '../db/logger.js';
 import { publishEvent, setRedisKey, deleteRedisKey } from '../redis/client.js';
 
 const sessions = new Map(); // tenantId -> { sock, qrCode, status, phoneNumber }
@@ -277,10 +278,39 @@ export async function connectSession(tenantId = 'default') {
       } catch {}
 
       console.log(`[WhatsApp] Session ${tenantId} connected successfully as ${phone}!`);
+
+      logWhatsAppEvent({
+        tenantId,
+        direction: 'system',
+        phone,
+        status: 'connected',
+        messageBody: `WhatsApp conectado com sucesso como ${phone}`,
+        metadata: { phone, name },
+      }).catch(() => {});
     }
   });
 
   sock.ev.on('messages.upsert', async (m) => {
+    // Log inbound messages to database
+    for (const msg of m.messages || []) {
+      if (msg.key?.fromMe) continue;
+      const senderJid = msg.key?.remoteJid || '';
+      if (!senderJid || senderJid.includes('@g.us')) continue; // Skip group messages
+      const senderPhone = senderJid.split('@')[0];
+      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+      if (text) {
+        logWhatsAppEvent({
+          tenantId,
+          direction: 'inbound',
+          phone: senderPhone,
+          status: 'received',
+          messageId: msg.key?.id,
+          messageBody: text,
+          metadata: { pushName: msg.pushName || null, jid: senderJid },
+        }).catch(() => {});
+      }
+    }
+
     await publishEvent('whatsapp:messages', {
       tenant_id: tenantId,
       messages: m.messages,
@@ -314,6 +344,14 @@ export async function disconnectSession(tenantId = 'default') {
   await deleteRedisKey(`whatsapp:live:${tenantId}`);
   await clearSessionCredentials(tenantId);
 
+  logWhatsAppEvent({
+    tenantId,
+    direction: 'system',
+    status: 'disconnected',
+    messageBody: `Sessão desconectada manualmente pelo usuário`,
+    metadata: { manual: true },
+  }).catch(() => {});
+
   await publishEvent('whatsapp:events', {
     tenant_id: tenantId,
     type: 'disconnected',
@@ -329,19 +367,41 @@ export async function disconnectSession(tenantId = 'default') {
 export async function sendMessage(tenantId = 'default', to, body, idempotencyKey = '') {
   const sessionObj = sessions.get(tenantId);
   if (!sessionObj || !sessionObj.sock || sessionObj.status !== 'connected') {
+    const errorMsg = 'WhatsApp is not connected.';
+    logWhatsAppEvent({
+      tenantId,
+      direction: 'outbound',
+      phone: to,
+      status: 'failed',
+      messageBody: body,
+      errorMessage: errorMsg,
+      metadata: { idempotencyKey },
+    }).catch(() => {});
+
     return {
       message_id: '',
       status: 'error',
-      error: 'WhatsApp is not connected.',
+      error: errorMsg,
     };
   }
 
   const cleanNumber = to.replace(/\D/g, '');
   if (!cleanNumber) {
+    const errorMsg = 'Número de telefone inválido.';
+    logWhatsAppEvent({
+      tenantId,
+      direction: 'outbound',
+      phone: to,
+      status: 'failed',
+      messageBody: body,
+      errorMessage: errorMsg,
+      metadata: { idempotencyKey },
+    }).catch(() => {});
+
     return {
       message_id: '',
       status: 'error',
-      error: 'Número de telefone inválido.',
+      error: errorMsg,
     };
   }
 
@@ -396,6 +456,16 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
     const messageId = result?.key?.id || idempotencyKey || `${Date.now()}`;
     console.log(`[WhatsApp] Message successfully delivered to server! ID: ${messageId}`);
 
+    logWhatsAppEvent({
+      tenantId,
+      direction: 'outbound',
+      phone: cleanNumber,
+      status: 'sent',
+      messageId,
+      messageBody: body,
+      metadata: { targetJid, isSelf, idempotencyKey },
+    }).catch(() => {});
+
     return {
       message_id: messageId,
       status: 'sent',
@@ -404,6 +474,17 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
     };
   } catch (err) {
     console.error(`[WhatsApp] Send message error to ${targetJid}:`, err.message);
+
+    logWhatsAppEvent({
+      tenantId,
+      direction: 'outbound',
+      phone: cleanNumber,
+      status: 'failed',
+      messageBody: body,
+      errorMessage: err.message || 'Failed to send message',
+      metadata: { targetJid, isSelf, idempotencyKey },
+    }).catch(() => {});
+
     return {
       message_id: '',
       status: 'failed',

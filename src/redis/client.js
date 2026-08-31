@@ -44,3 +44,26 @@ export async function publishEvent(channel, eventData) {
     console.error('[Redis Publish Error]', err.message);
   }
 }
+
+export async function setRedisKey(key, value, ttlSeconds = 10) {
+  try {
+    const client = getRedisClient();
+    const payload = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    if (ttlSeconds > 0) {
+      await client.set(key, payload, 'EX', ttlSeconds);
+    } else {
+      await client.set(key, payload);
+    }
+  } catch (err) {
+    // ignore redis error
+  }
+}
+
+export async function deleteRedisKey(key) {
+  try {
+    const client = getRedisClient();
+    await client.del(key);
+  } catch (err) {
+    // ignore
+  }
+}

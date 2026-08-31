@@ -6,11 +6,71 @@ import QRCode from 'qrcode';
 import pino from 'pino';
 import { useMySQLAuthState, clearSessionCredentials } from '../db/mysql-auth-state.js';
 import { getDbPool } from '../db/connection.js';
-import { publishEvent } from '../redis/client.js';
+import { publishEvent, setRedisKey, deleteRedisKey } from '../redis/client.js';
 
 const sessions = new Map(); // tenantId -> { sock, qrCode, status, phoneNumber }
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
+
+// 💓 Active Heartbeat loop running every 2.5 seconds
+setInterval(async () => {
+  const db = getDbPool();
+
+  for (const [tenantId, session] of sessions.entries()) {
+    if (session.status === 'connected' && session.sock?.user) {
+      // 1. Update Redis live key with 6s TTL
+      await setRedisKey(`whatsapp:live:${tenantId}`, {
+        status: 'connected',
+        phone_number: session.phoneNumber,
+        timestamp: Date.now(),
+      }, 6);
+
+      // 2. Update DB last_activity_at
+      try {
+        await db.query(
+          `UPDATE whatsapp_sessions SET status = 'connected', last_activity_at = CURRENT_TIMESTAMP WHERE tenant_id = ?`,
+          [tenantId]
+        );
+      } catch {}
+    } else if (session.status === 'connecting' || session.status === 'qr_ready') {
+      await setRedisKey(`whatsapp:live:${tenantId}`, {
+        status: session.status,
+        qr_code: session.qrCode,
+        timestamp: Date.now(),
+      }, 6);
+    }
+  }
+}, 2500);
+
+// 🛡️ Graceful process shutdown handler to instantly inform Laravel if agenwpp goes down
+async function handleProcessExit() {
+  const db = getDbPool();
+  for (const [tenantId, session] of sessions.entries()) {
+    session.status = 'disconnected';
+    await deleteRedisKey(`whatsapp:live:${tenantId}`);
+    try {
+      await db.query(
+        `UPDATE whatsapp_sessions SET status = 'disconnected', qr_code = NULL WHERE tenant_id = ?`,
+        [tenantId]
+      );
+    } catch {}
+    await publishEvent('whatsapp:events', {
+      tenant_id: tenantId,
+      type: 'disconnected',
+      reason: 'process_exit',
+    });
+  }
+}
+
+process.on('SIGINT', async () => {
+  await handleProcessExit();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  await handleProcessExit();
+  process.exit(0);
+});
 
 export async function getSessionStatus(tenantId = 'default') {
   const memSession = sessions.get(tenantId);
@@ -120,6 +180,12 @@ export async function connectSession(tenantId = 'default') {
           console.error('[DB QR Update Error]', dbErr.message);
         }
 
+        await setRedisKey(`whatsapp:live:${tenantId}`, {
+          status: 'qr_ready',
+          qr_code: qrDataUrl,
+          timestamp: Date.now(),
+        }, 30);
+
         await publishEvent('whatsapp:events', {
           tenant_id: tenantId,
           type: 'qr_ready',
@@ -138,6 +204,8 @@ export async function connectSession(tenantId = 'default') {
       sessionObj.status = 'disconnected';
       sessionObj.qrCode = '';
 
+      await deleteRedisKey(`whatsapp:live:${tenantId}`);
+
       if (isLoggedOut || isConflict) {
         console.log(`[WhatsApp] Session ${tenantId} logged out or device removed (${statusCode}). Clearing credentials for clean pairing.`);
         await clearSessionCredentials(tenantId);
@@ -145,7 +213,7 @@ export async function connectSession(tenantId = 'default') {
 
         await publishEvent('whatsapp:events', {
           tenant_id: tenantId,
-          type: 'logged_out',
+          type: 'disconnected',
           reason: statusCode,
         });
       } else {
@@ -187,6 +255,13 @@ export async function connectSession(tenantId = 'default') {
       } catch (dbErr) {
         console.error('[DB Connected Update Error]', dbErr.message);
       }
+
+      await setRedisKey(`whatsapp:live:${tenantId}`, {
+        status: 'connected',
+        phone_number: phone,
+        name,
+        timestamp: Date.now(),
+      }, 10);
 
       await publishEvent('whatsapp:events', {
         tenant_id: tenantId,
@@ -235,6 +310,7 @@ export async function disconnectSession(tenantId = 'default') {
   }
 
   sessions.delete(tenantId);
+  await deleteRedisKey(`whatsapp:live:${tenantId}`);
   await clearSessionCredentials(tenantId);
 
   await publishEvent('whatsapp:events', {

@@ -92,6 +92,8 @@ export async function connectSession(tenantId = 'default') {
     logger,
     auth: state,
     browser: ['Agendae Admin', 'Chrome', '1.0.0'],
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
   });
@@ -192,6 +194,11 @@ export async function connectSession(tenantId = 'default') {
         phone_number: phone,
         name,
       });
+
+      // Keep presence unavailable so mobile phone keeps receiving notifications
+      try {
+        await sock.sendPresenceUpdate('unavailable');
+      } catch {}
 
       console.log(`[WhatsApp] Session ${tenantId} connected successfully as ${phone}!`);
     }

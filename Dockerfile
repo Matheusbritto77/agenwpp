@@ -21,6 +21,6 @@ RUN chown -R agenwpp:agenwpp /app
 
 USER agenwpp
 
-EXPOSE 50051
+EXPOSE 50051 50052
 
 CMD ["node", "src/index.js"]

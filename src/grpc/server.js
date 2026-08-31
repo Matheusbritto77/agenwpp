@@ -1,7 +1,13 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import grpc from '@grpc/grpc-js';
 import protoLoader from '@grpc/proto-loader';
+import {
+  getSessionStatus,
+  connectSession,
+  disconnectSession,
+  sendMessage,
+} from '../whatsapp/manager.js';
+import { getRedisClient } from '../redis/client.js';
 
 const protoPath = path.resolve(process.cwd(), 'proto/whatsapp.proto');
 
@@ -19,23 +25,96 @@ function loadDefinition() {
 
 function createHandlers() {
   return {
-    SendMessage(call, callback) {
-      const { tenant_id: tenantId, to, body, idempotency_key: idempotencyKey } = call.request;
+    async GetStatus(call, callback) {
+      try {
+        const tenantId = call.request?.tenant_id || 'default';
+        const status = await getSessionStatus(tenantId);
+        callback(null, status);
+      } catch (err) {
+        callback(null, {
+          state: 'error',
+          phone_number: '',
+          tenant_id: call.request?.tenant_id || 'default',
+          qr_code: '',
+          updated_at: new Date().toISOString(),
+        });
+      }
+    },
 
-      callback(null, {
-        message_id: idempotencyKey || `${tenantId}:${to}:${Date.now()}`,
-        status: body ? 'queued' : 'rejected',
-      });
+    async Connect(call, callback) {
+      try {
+        const tenantId = call.request?.tenant_id || 'default';
+        const result = await connectSession(tenantId);
+        callback(null, result);
+      } catch (err) {
+        callback(null, {
+          status: 'error',
+          qr_code: '',
+          message: err.message || 'Error connecting',
+        });
+      }
     },
-    GetStatus(_call, callback) {
-      callback(null, { state: 'starting' });
+
+    async Disconnect(call, callback) {
+      try {
+        const tenantId = call.request?.tenant_id || 'default';
+        const result = await disconnectSession(tenantId);
+        callback(null, result);
+      } catch (err) {
+        callback(null, {
+          status: 'error',
+          message: err.message || 'Error disconnecting',
+        });
+      }
     },
+
+    async SendMessage(call, callback) {
+      try {
+        const {
+          tenant_id: tenantId = 'default',
+          to,
+          body,
+          idempotency_key: idempotencyKey,
+        } = call.request;
+
+        const result = await sendMessage(tenantId, to, body, idempotencyKey);
+        callback(null, result);
+      } catch (err) {
+        callback(null, {
+          message_id: '',
+          status: 'failed',
+          error: err.message || 'Error sending message',
+        });
+      }
+    },
+
     StreamEvents(call) {
-      call.write({
-        type: 'service.ready',
-        payload_json: JSON.stringify({ ok: true, timestamp: new Date().toISOString() }),
+      const redisSub = getRedisClient().duplicate();
+      redisSub.subscribe('whatsapp:events', (err) => {
+        if (err) {
+          console.error('[Redis Stream Sub Error]', err);
+        }
       });
-      call.end();
+
+      redisSub.on('message', (_channel, message) => {
+        try {
+          const parsed = JSON.parse(message);
+          call.write({
+            type: parsed.type || 'event',
+            payload_json: message,
+          });
+        } catch {
+          // ignore parsing error
+        }
+      });
+
+      call.on('cancelled', () => {
+        redisSub.disconnect();
+      });
+
+      call.on('end', () => {
+        redisSub.disconnect();
+      });
     },
   };
 }
@@ -58,10 +137,9 @@ export async function startGrpcServer({ port = 50051 } = {}) {
 
         server.start();
         resolve(boundPort);
-      },
+      }
     );
   });
 
   return server;
 }
-

@@ -3,6 +3,9 @@ syntax = "proto3";
 package whatsapp;
 
 service WhatsAppBridge {
+  // Bidirectional gRPC stream between adminagenda (client) and agenwpp (server)
+  rpc ChannelStream (stream BridgeClientMessage) returns (stream BridgeServerMessage);
+
   rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
   rpc GetStatus (GetStatusRequest) returns (StatusResponse);
   rpc Connect (ConnectRequest) returns (ConnectResponse);
@@ -11,6 +14,19 @@ service WhatsAppBridge {
 }
 
 message Empty {}
+
+message BridgeClientMessage {
+  string tenant_id = 1;
+  string action = 2; // 'ping', 'connect', 'disconnect', 'send_message', 'get_status'
+  string payload_json = 3;
+}
+
+message BridgeServerMessage {
+  string tenant_id = 1;
+  string event = 2; // 'pong', 'status', 'qr_ready', 'connected', 'disconnected', 'message_sent', 'message_received'
+  string payload_json = 3;
+  int64 timestamp = 4;
+}
 
 message GetStatusRequest {
   string tenant_id = 1;

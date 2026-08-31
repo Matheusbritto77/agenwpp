@@ -3,6 +3,7 @@ import { initDbTables } from './db/connection.js';
 import { startGrpcServer } from './grpc/server.js';
 import { startHttpServer } from './http/server.js';
 import { startRedisCommandSubscriber } from './redis/subscriber.js';
+import { restoreSavedSessions } from './whatsapp/manager.js';
 
 async function main() {
   const grpcPort = Number(process.env.GRPC_PORT || 50051);
@@ -24,6 +25,9 @@ async function main() {
 
   // 3. Start Redis Command Subscriber
   startRedisCommandSubscriber();
+
+  // 4. Auto-inspect database and restore existing WhatsApp sessions
+  await restoreSavedSessions();
 }
 
 main().catch((error) => {

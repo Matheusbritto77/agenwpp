@@ -356,3 +356,26 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
     };
   }
 }
+
+/**
+ * Automatically inspects the shared database on startup and restores all existing connected sessions
+ */
+export async function restoreSavedSessions() {
+  const db = getDbPool();
+  try {
+    const [rows] = await db.query(
+      'SELECT tenant_id, creds, status, phone_number FROM whatsapp_sessions WHERE creds IS NOT NULL'
+    );
+
+    for (const row of rows) {
+      if (row.creds) {
+        console.log(`[Auto-Restore] Found stored session for tenant '${row.tenant_id}'. Connecting automatically...`);
+        connectSession(row.tenant_id).catch((err) => {
+          console.warn(`[Auto-Restore Warning] Could not restore session ${row.tenant_id}:`, err.message);
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[Auto-Restore Warning] Error querying saved sessions:', err.message);
+  }
+}

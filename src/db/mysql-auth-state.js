@@ -1,6 +1,22 @@
 import { initAuthCreds, BufferJSON } from '@whiskeysockets/baileys';
 import { getDbPool } from './connection.js';
 
+export async function clearSessionCredentials(tenantId = 'default') {
+  const db = getDbPool();
+  try {
+    await db.query('DELETE FROM whatsapp_auth_keys WHERE tenant_id = ?', [tenantId]);
+    await db.query(
+      `UPDATE whatsapp_sessions
+       SET creds = NULL, status = 'disconnected', qr_code = NULL, phone_number = NULL, profile_name = NULL, disconnected_at = CURRENT_TIMESTAMP
+       WHERE tenant_id = ?`,
+      [tenantId]
+    );
+    console.log(`[Auth State] Cleared all stored credentials for tenant ${tenantId}`);
+  } catch (err) {
+    console.error('[ClearSession Error]', err.message);
+  }
+}
+
 export async function useMySQLAuthState(tenantId = 'default') {
   const db = getDbPool();
 

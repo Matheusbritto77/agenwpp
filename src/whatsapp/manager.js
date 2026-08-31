@@ -4,7 +4,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import pino from 'pino';
-import { useMySQLAuthState } from '../db/mysql-auth-state.js';
+import { useMySQLAuthState, clearSessionCredentials } from '../db/mysql-auth-state.js';
 import { getDbPool } from '../db/connection.js';
 import { publishEvent } from '../redis/client.js';
 
@@ -51,6 +51,17 @@ export async function connectSession(tenantId = 'default') {
       qr_code: '',
       message: 'Session already connected.',
     };
+  }
+
+  // If previous socket exists in non-connected state, safely destroy it before reconnecting
+  if (existing && existing.sock) {
+    try {
+      existing.sock.ev.removeAllListeners('connection.update');
+      existing.sock.ev.removeAllListeners('creds.update');
+      existing.sock.ev.removeAllListeners('messages.upsert');
+      existing.sock.end(new Error('Starting new session'));
+    } catch {}
+    sessions.delete(tenantId);
   }
 
   const db = getDbPool();
@@ -119,34 +130,42 @@ export async function connectSession(tenantId = 'default') {
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+      const isConflict = statusCode === DisconnectReason.connectionReplaced || String(lastDisconnect?.error).includes('device_removed');
 
       sessionObj.status = 'disconnected';
       sessionObj.qrCode = '';
 
-      try {
-        await db.query(
-          `UPDATE whatsapp_sessions
-           SET status = 'disconnected', qr_code = NULL
-           WHERE tenant_id = ?`,
-          [tenantId]
-        );
-      } catch (dbErr) {
-        console.error('[DB Disconnect Update Error]', dbErr.message);
-      }
-
-      await publishEvent('whatsapp:events', {
-        tenant_id: tenantId,
-        type: 'disconnected',
-        reason: statusCode,
-      });
-
-      if (shouldReconnect) {
-        console.log(`[WhatsApp] Reconnecting session ${tenantId} after stream close (reason: ${statusCode || 'reconnect'})...`);
-        setTimeout(() => connectSession(tenantId), 3000);
-      } else {
-        console.log(`[WhatsApp] Session ${tenantId} logged out.`);
+      if (isLoggedOut || isConflict) {
+        console.log(`[WhatsApp] Session ${tenantId} logged out or device removed (${statusCode}). Clearing credentials for clean pairing.`);
+        await clearSessionCredentials(tenantId);
         sessions.delete(tenantId);
+
+        await publishEvent('whatsapp:events', {
+          tenant_id: tenantId,
+          type: 'logged_out',
+          reason: statusCode,
+        });
+      } else {
+        try {
+          await db.query(
+            `UPDATE whatsapp_sessions
+             SET status = 'disconnected', qr_code = NULL
+             WHERE tenant_id = ?`,
+            [tenantId]
+          );
+        } catch (dbErr) {
+          console.error('[DB Disconnect Update Error]', dbErr.message);
+        }
+
+        await publishEvent('whatsapp:events', {
+          tenant_id: tenantId,
+          type: 'disconnected',
+          reason: statusCode,
+        });
+
+        console.log(`[WhatsApp] Reconnecting session ${tenantId} after stream close (status: ${statusCode || 'reconnecting'})...`);
+        setTimeout(() => connectSession(tenantId), 4000);
       }
     } else if (connection === 'open') {
       const phone = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0] : '';
@@ -159,7 +178,7 @@ export async function connectSession(tenantId = 'default') {
       try {
         await db.query(
           `UPDATE whatsapp_sessions
-           SET status = 'connected', qr_code = NULL, phone_number = ?, profile_name = ?
+           SET status = 'connected', qr_code = NULL, phone_number = ?, profile_name = ?, connected_at = CURRENT_TIMESTAMP
            WHERE tenant_id = ?`,
           [phone, name, tenantId]
         );
@@ -197,6 +216,9 @@ export async function disconnectSession(tenantId = 'default') {
   const sessionObj = sessions.get(tenantId);
   if (sessionObj && sessionObj.sock) {
     try {
+      sessionObj.sock.ev.removeAllListeners('connection.update');
+      sessionObj.sock.ev.removeAllListeners('creds.update');
+      sessionObj.sock.ev.removeAllListeners('messages.upsert');
       await sessionObj.sock.logout();
     } catch {
       try {
@@ -206,18 +228,7 @@ export async function disconnectSession(tenantId = 'default') {
   }
 
   sessions.delete(tenantId);
-  const db = getDbPool();
-
-  try {
-    await db.query(
-      `UPDATE whatsapp_sessions
-       SET status = 'disconnected', qr_code = NULL
-       WHERE tenant_id = ?`,
-      [tenantId]
-    );
-  } catch (dbErr) {
-    console.error('[DB Disconnect Error]', dbErr.message);
-  }
+  await clearSessionCredentials(tenantId);
 
   await publishEvent('whatsapp:events', {
     tenant_id: tenantId,
@@ -227,7 +238,7 @@ export async function disconnectSession(tenantId = 'default') {
 
   return {
     status: 'disconnected',
-    message: 'Session disconnected successfully.',
+    message: 'Session disconnected and cleared successfully.',
   };
 }
 

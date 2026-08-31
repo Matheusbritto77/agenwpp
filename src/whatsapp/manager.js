@@ -16,20 +16,31 @@ export async function getSessionStatus(tenantId = 'default') {
   const memSession = sessions.get(tenantId);
   const db = getDbPool();
 
-  const [rows] = await db.query(
-    'SELECT * FROM whatsapp_sessions WHERE tenant_id = ? LIMIT 1',
-    [tenantId]
-  );
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM whatsapp_sessions WHERE tenant_id = ? LIMIT 1',
+      [tenantId]
+    );
 
-  const row = rows[0] || null;
+    const row = rows[0] || null;
 
-  return {
-    state: memSession?.status || row?.status || 'disconnected',
-    phone_number: memSession?.phoneNumber || row?.phone_number || '',
-    tenant_id: tenantId,
-    qr_code: memSession?.qrCode || row?.qr_code || '',
-    updated_at: row?.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
-  };
+    return {
+      state: memSession?.status || row?.status || 'disconnected',
+      phone_number: memSession?.phoneNumber || row?.phone_number || '',
+      tenant_id: tenantId,
+      qr_code: memSession?.qrCode || row?.qr_code || '',
+      updated_at: row?.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+    };
+  } catch (err) {
+    console.error('[GetSessionStatus Error]', err.message);
+    return {
+      state: memSession?.status || 'disconnected',
+      phone_number: memSession?.phoneNumber || '',
+      tenant_id: tenantId,
+      qr_code: memSession?.qrCode || '',
+      updated_at: new Date().toISOString(),
+    };
+  }
 }
 
 export async function connectSession(tenantId = 'default') {
@@ -54,18 +65,21 @@ export async function connectSession(tenantId = 'default') {
   };
   sessions.set(tenantId, sessionObj);
 
-  await db.query(
-    `INSERT INTO whatsapp_sessions (tenant_id, status, qr_code)
-     VALUES (?, 'connecting', NULL)
-     ON DUPLICATE KEY UPDATE status = 'connecting'`,
-    [tenantId]
-  );
+  try {
+    await db.query(
+      `INSERT INTO whatsapp_sessions (tenant_id, status, qr_code)
+       VALUES (?, 'connecting', NULL)
+       ON DUPLICATE KEY UPDATE status = 'connecting'`,
+      [tenantId]
+    );
+  } catch (err) {
+    console.warn('[DB Warning] could not update status to connecting:', err.message);
+  }
 
   const sock = makeWASocket({
     version,
     logger,
     auth: state,
-    printQRInTerminal: true,
     browser: ['Agendae Admin', 'Chrome', '1.0.0'],
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
@@ -84,10 +98,14 @@ export async function connectSession(tenantId = 'default') {
         sessionObj.qrCode = qrDataUrl;
         sessionObj.status = 'qr_ready';
 
-        await db.query(
-          `UPDATE whatsapp_sessions SET status = 'qr_ready', qr_code = ? WHERE tenant_id = ?`,
-          [qrDataUrl, tenantId]
-        );
+        try {
+          await db.query(
+            `UPDATE whatsapp_sessions SET status = 'qr_ready', qr_code = ? WHERE tenant_id = ?`,
+            [qrDataUrl, tenantId]
+          );
+        } catch (dbErr) {
+          console.error('[DB QR Update Error]', dbErr.message);
+        }
 
         await publishEvent('whatsapp:events', {
           tenant_id: tenantId,
@@ -95,7 +113,7 @@ export async function connectSession(tenantId = 'default') {
           qr_code: qrDataUrl,
         });
       } catch (err) {
-        console.error('[QR Generation Error]', err);
+        console.error('[QR Generation Error]', err.message);
       }
     }
 
@@ -106,12 +124,16 @@ export async function connectSession(tenantId = 'default') {
       sessionObj.status = 'disconnected';
       sessionObj.qrCode = '';
 
-      await db.query(
-        `UPDATE whatsapp_sessions
-         SET status = 'disconnected', qr_code = NULL, disconnected_at = CURRENT_TIMESTAMP
-         WHERE tenant_id = ?`,
-        [tenantId]
-      );
+      try {
+        await db.query(
+          `UPDATE whatsapp_sessions
+           SET status = 'disconnected', qr_code = NULL
+           WHERE tenant_id = ?`,
+          [tenantId]
+        );
+      } catch (dbErr) {
+        console.error('[DB Disconnect Update Error]', dbErr.message);
+      }
 
       await publishEvent('whatsapp:events', {
         tenant_id: tenantId,
@@ -120,8 +142,8 @@ export async function connectSession(tenantId = 'default') {
       });
 
       if (shouldReconnect) {
-        console.log(`[WhatsApp] Reconnecting session ${tenantId}...`);
-        setTimeout(() => connectSession(tenantId), 5000);
+        console.log(`[WhatsApp] Reconnecting session ${tenantId} after stream close (reason: ${statusCode || 'reconnect'})...`);
+        setTimeout(() => connectSession(tenantId), 3000);
       } else {
         console.log(`[WhatsApp] Session ${tenantId} logged out.`);
         sessions.delete(tenantId);
@@ -134,12 +156,16 @@ export async function connectSession(tenantId = 'default') {
       sessionObj.qrCode = '';
       sessionObj.phoneNumber = phone;
 
-      await db.query(
-        `UPDATE whatsapp_sessions
-         SET status = 'connected', qr_code = NULL, phone_number = ?, profile_name = ?, connected_at = CURRENT_TIMESTAMP
-         WHERE tenant_id = ?`,
-        [phone, name, tenantId]
-      );
+      try {
+        await db.query(
+          `UPDATE whatsapp_sessions
+           SET status = 'connected', qr_code = NULL, phone_number = ?, profile_name = ?
+           WHERE tenant_id = ?`,
+          [phone, name, tenantId]
+        );
+      } catch (dbErr) {
+        console.error('[DB Connected Update Error]', dbErr.message);
+      }
 
       await publishEvent('whatsapp:events', {
         tenant_id: tenantId,
@@ -173,19 +199,25 @@ export async function disconnectSession(tenantId = 'default') {
     try {
       await sessionObj.sock.logout();
     } catch {
-      sessionObj.sock.end(new Error('Manual disconnect'));
+      try {
+        sessionObj.sock.end(new Error('Manual disconnect'));
+      } catch {}
     }
   }
 
   sessions.delete(tenantId);
   const db = getDbPool();
 
-  await db.query(
-    `UPDATE whatsapp_sessions
-     SET status = 'disconnected', qr_code = NULL, disconnected_at = CURRENT_TIMESTAMP
-     WHERE tenant_id = ?`,
-    [tenantId]
-  );
+  try {
+    await db.query(
+      `UPDATE whatsapp_sessions
+       SET status = 'disconnected', qr_code = NULL
+       WHERE tenant_id = ?`,
+      [tenantId]
+    );
+  } catch (dbErr) {
+    console.error('[DB Disconnect Error]', dbErr.message);
+  }
 
   await publishEvent('whatsapp:events', {
     tenant_id: tenantId,

@@ -34,10 +34,30 @@ export async function initDbTables() {
       creds LONGTEXT NULL,
       connected_at TIMESTAMP NULL,
       last_activity_at TIMESTAMP NULL,
+      disconnected_at TIMESTAMP NULL,
       created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
+
+  // Ensure any missing columns exist if table was created previously
+  const columns = [
+    { name: 'phone_number', def: 'VARCHAR(32) NULL' },
+    { name: 'profile_name', def: 'VARCHAR(255) NULL' },
+    { name: 'qr_code', def: 'LONGTEXT NULL' },
+    { name: 'creds', def: 'LONGTEXT NULL' },
+    { name: 'connected_at', def: 'TIMESTAMP NULL' },
+    { name: 'last_activity_at', def: 'TIMESTAMP NULL' },
+    { name: 'disconnected_at', def: 'TIMESTAMP NULL' },
+  ];
+
+  for (const col of columns) {
+    try {
+      await db.query(`ALTER TABLE whatsapp_sessions ADD COLUMN ${col.name} ${col.def}`);
+    } catch {
+      // Column already exists, safe to ignore
+    }
+  }
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_auth_keys (

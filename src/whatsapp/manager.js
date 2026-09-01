@@ -192,10 +192,11 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
     version,
     logger,
     auth: state,
-    browser: Browsers.macOS('Desktop'),
+    browser: Browsers.ubuntu('Chrome'),
     printQRInTerminal: false,
-    markOnlineOnConnect: true,
+    markOnlineOnConnect: false,
     syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
   });

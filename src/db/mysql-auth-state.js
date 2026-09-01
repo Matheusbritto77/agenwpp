@@ -30,11 +30,18 @@ export async function useMySQLAuthState(tenantId = 'default') {
   if (rows.length > 0 && rows[0].creds) {
     try {
       creds = JSON.parse(rows[0].creds, BufferJSON.reviver);
+      // If creds exist but are not registered (failed previous pairing), reset to fresh credentials
+      if (!creds?.me && !creds?.registered) {
+        creds = initAuthCreds();
+        await db.query('DELETE FROM whatsapp_auth_keys WHERE tenant_id = ?', [tenantId]).catch(() => {});
+      }
     } catch (e) {
       creds = initAuthCreds();
+      await db.query('DELETE FROM whatsapp_auth_keys WHERE tenant_id = ?', [tenantId]).catch(() => {});
     }
   } else {
     creds = initAuthCreds();
+    await db.query('DELETE FROM whatsapp_auth_keys WHERE tenant_id = ?', [tenantId]).catch(() => {});
     await db.query(
       `INSERT INTO whatsapp_sessions (tenant_id, status, creds)
        VALUES (?, 'disconnected', ?)

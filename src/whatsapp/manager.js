@@ -1,4 +1,5 @@
 import makeWASocket, {
+  Browsers,
   DisconnectReason,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
@@ -20,8 +21,11 @@ import { publishEvent, setRedisKey, deleteRedisKey } from '../redis/client.js';
 
 const sessions = new Map(); // tenantId -> { sock, qrCode, status, phoneNumber }
 
-// 🤫 Configure Baileys internal pino logger to 'silent' to prevent raw JSON stack traces in stdout
-const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
+// 🤫 Completely disable Baileys internal pino logger output to prevent raw JSON traces
+const logger = pino({
+  level: 'silent',
+  enabled: false,
+});
 
 function getFriendlyDisconnectReason(statusCode, error) {
   if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
@@ -184,8 +188,9 @@ export async function connectSession(tenantId = 'default') {
     version,
     logger,
     auth: state,
-    browser: ['Windows', 'Chrome', '128.0.6613.120'],
-    markOnlineOnConnect: false,
+    browser: Browsers.macOS('Desktop'),
+    printQRInTerminal: false,
+    markOnlineOnConnect: true,
     syncFullHistory: false,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
@@ -367,10 +372,10 @@ export async function disconnectSession(tenantId = 'default') {
       sessionObj.sock.ev.removeAllListeners('connection.update');
       sessionObj.sock.ev.removeAllListeners('creds.update');
       sessionObj.sock.ev.removeAllListeners('messages.upsert');
-      await sessionObj.sock.logout();
+      await sessionObj.sock.logout().catch(() => {});
     } catch {
       try {
-        sessionObj.sock.end(new Error('Manual disconnect'));
+        sessionObj.sock.end(undefined);
       } catch {}
     }
   }
@@ -482,55 +487,6 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
   if (isSelf && myJid) {
     targetJid = myJid;
     console.log(`[WhatsApp] Self-message detected! Sending directly to own JID: ${targetJid}`);
-  } else {
-    // 🔎 Automatically query WhatsApp server for the exact registered JID (handling Brazilian 9th digit)
-    let exists = false;
-    try {
-      const check = await sessionObj.sock.onWhatsApp(cleanNumber);
-      if (check && check.length > 0 && check[0].exists) {
-        targetJid = check[0].jid;
-        exists = true;
-      } else if (cleanNumber.startsWith('55') && cleanNumber.length === 13) {
-        // Try without 9th digit (55 + DDD + 8 digits)
-        const without9 = cleanNumber.slice(0, 4) + cleanNumber.slice(5);
-        const checkWithout9 = await sessionObj.sock.onWhatsApp(without9);
-        if (checkWithout9 && checkWithout9.length > 0 && checkWithout9[0].exists) {
-          targetJid = checkWithout9[0].jid;
-          exists = true;
-        }
-      } else if (cleanNumber.startsWith('55') && cleanNumber.length === 12) {
-        // Try with 9th digit (55 + DDD + 9 + 8 digits)
-        const with9 = cleanNumber.slice(0, 4) + '9' + cleanNumber.slice(4);
-        const checkWith9 = await sessionObj.sock.onWhatsApp(with9);
-        if (checkWith9 && checkWith9.length > 0 && checkWith9[0].exists) {
-          targetJid = checkWith9[0].jid;
-          exists = true;
-        }
-      }
-
-      // 🛡️ Anti-Ban: If number definitively does not exist on WhatsApp, cache and reject to prevent ban
-      if (!exists) {
-        markNumberAsInvalid(cleanNumber);
-        const notFoundMsg = `O número ${cleanNumber} não possui conta ativa no WhatsApp.`;
-        logWhatsAppEvent({
-          tenantId,
-          direction: 'outbound',
-          phone: cleanNumber,
-          status: 'failed',
-          messageBody: finalBody,
-          errorMessage: notFoundMsg,
-          metadata: { idempotencyKey, not_on_whatsapp: true },
-        }).catch(() => {});
-
-        return {
-          message_id: '',
-          status: 'failed',
-          error: notFoundMsg,
-        };
-      }
-    } catch (checkErr) {
-      console.warn('[onWhatsApp check warning]', checkErr.message);
-    }
   }
 
   // 🛡️ Anti-Ban: Humanized Presence Simulation (Simular "Digitando..." por 1.2s - 3.2s)

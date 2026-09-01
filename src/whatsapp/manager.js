@@ -20,7 +20,30 @@ import { publishEvent, setRedisKey, deleteRedisKey } from '../redis/client.js';
 
 const sessions = new Map(); // tenantId -> { sock, qrCode, status, phoneNumber }
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
+// 🤫 Configure Baileys internal pino logger to 'silent' to prevent raw JSON stack traces in stdout
+const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
+
+function getFriendlyDisconnectReason(statusCode, error) {
+  if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+    return 'Sessão desconectada no aparelho';
+  }
+  if (statusCode === DisconnectReason.connectionReplaced || String(error).includes('device_removed')) {
+    return 'Sessão substituída por outra conexão ativa ou aparelho desconectado';
+  }
+  if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
+    return 'Reinício solicitado pelo servidor do WhatsApp';
+  }
+  if (statusCode === DisconnectReason.timedOut || statusCode === 408) {
+    return 'Tempo limite de rede esgotado';
+  }
+  if (statusCode === DisconnectReason.badSession) {
+    return 'Chaves de sessão corrompidas ou inválidas';
+  }
+  if (String(error?.message || error || '').includes('Connection Failure')) {
+    return 'Instabilidade temporária de conexão com o WhatsApp';
+  }
+  return `Conexão encerrada (código: ${statusCode || 'stream_close'})`;
+}
 
 // 💓 Active Heartbeat loop running every 2.5 seconds
 setInterval(async () => {
@@ -208,8 +231,10 @@ export async function connectSession(tenantId = 'default') {
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const errorObj = lastDisconnect?.error;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
-      const isConflict = statusCode === DisconnectReason.connectionReplaced || String(lastDisconnect?.error).includes('device_removed');
+      const isConflict = statusCode === DisconnectReason.connectionReplaced || String(errorObj).includes('device_removed');
+      const friendlyReason = getFriendlyDisconnectReason(statusCode, errorObj);
 
       sessionObj.status = 'disconnected';
       sessionObj.qrCode = '';
@@ -217,7 +242,7 @@ export async function connectSession(tenantId = 'default') {
       await deleteRedisKey(`whatsapp:live:${tenantId}`);
 
       if (isLoggedOut || isConflict) {
-        console.log(`[WhatsApp] Session ${tenantId} logged out or device removed (${statusCode}). Clearing credentials for clean pairing.`);
+        console.log(`[WhatsApp] Sessão '${tenantId}' desconectada: ${friendlyReason} (${statusCode}). Limpando credenciais para novo pareamento.`);
         await clearSessionCredentials(tenantId);
         sessions.delete(tenantId);
 
@@ -225,6 +250,7 @@ export async function connectSession(tenantId = 'default') {
           tenant_id: tenantId,
           type: 'disconnected',
           reason: statusCode,
+          friendly_reason: friendlyReason,
         });
       } else {
         try {
@@ -242,9 +268,10 @@ export async function connectSession(tenantId = 'default') {
           tenant_id: tenantId,
           type: 'disconnected',
           reason: statusCode,
+          friendly_reason: friendlyReason,
         });
 
-        console.log(`[WhatsApp] Reconnecting session ${tenantId} after stream close (status: ${statusCode || 'reconnecting'})...`);
+        console.log(`[WhatsApp] Sessão '${tenantId}' pausada: ${friendlyReason}. Reconectando automaticamente em 4s...`);
         setTimeout(() => connectSession(tenantId), 4000);
       }
     } else if (connection === 'open') {

@@ -70,7 +70,8 @@ export function startHttpServer({ port = 50052 } = {}) {
     if (url.pathname === '/connect' && req.method === 'POST') {
       const body = await parseJsonBody(req);
       const tenantId = body.tenant_id || 'default';
-      const result = await connectSession(tenantId);
+      const phoneNumber = body.phone_number || body.phone || null;
+      const result = await connectSession(tenantId, phoneNumber);
       sendJson(res, 200, result);
       return;
     }

@@ -72,7 +72,7 @@ function createHandlers() {
               timestamp: Date.now(),
             });
           } else if (action === 'connect') {
-            const result = await connectSession(tenantId);
+            const result = await connectSession(tenantId, payload.phone_number || payload.phone || null);
             call.write({
               tenant_id: tenantId,
               event: 'connect_result',
@@ -135,6 +135,7 @@ function createHandlers() {
           phone_number: '',
           tenant_id: call.request?.tenant_id || 'default',
           qr_code: '',
+          pairing_code: '',
           updated_at: new Date().toISOString(),
         });
       }
@@ -143,12 +144,14 @@ function createHandlers() {
     async Connect(call, callback) {
       try {
         const tenantId = call.request?.tenant_id || 'default';
-        const result = await connectSession(tenantId);
+        const phoneNumber = call.request?.phone_number || null;
+        const result = await connectSession(tenantId, phoneNumber);
         callback(null, result);
       } catch (err) {
         callback(null, {
           status: 'error',
           qr_code: '',
+          pairing_code: '',
           message: err.message || 'Error connecting',
         });
       }

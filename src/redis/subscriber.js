@@ -25,7 +25,7 @@ export function startRedisCommandSubscriber() {
         console.log(`[Redis Command Received] Action: ${action}, Tenant: ${tenantId}`);
 
         if (action === 'connect') {
-          await connectSession(tenantId);
+          await connectSession(tenantId, payload.phone_number || payload.phone || null);
         } else if (action === 'disconnect') {
           await disconnectSession(tenantId);
         } else if (action === 'send_message') {

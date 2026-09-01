@@ -45,6 +45,7 @@ export async function initDbTables() {
     { name: 'phone_number', def: 'VARCHAR(32) NULL' },
     { name: 'profile_name', def: 'VARCHAR(255) NULL' },
     { name: 'qr_code', def: 'LONGTEXT NULL' },
+    { name: 'pairing_code', def: 'VARCHAR(32) NULL' },
     { name: 'creds', def: 'LONGTEXT NULL' },
     { name: 'connected_at', def: 'TIMESTAMP NULL' },
     { name: 'last_activity_at', def: 'TIMESTAMP NULL' },

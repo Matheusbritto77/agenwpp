@@ -126,6 +126,7 @@ export async function getSessionStatus(tenantId = 'default') {
       phone_number: memSession?.phoneNumber || row?.phone_number || '',
       tenant_id: tenantId,
       qr_code: memSession?.qrCode || row?.qr_code || '',
+      pairing_code: memSession?.pairingCode || row?.pairing_code || '',
       updated_at: row?.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
     };
   } catch (err) {
@@ -135,17 +136,19 @@ export async function getSessionStatus(tenantId = 'default') {
       phone_number: memSession?.phoneNumber || '',
       tenant_id: tenantId,
       qr_code: memSession?.qrCode || '',
+      pairing_code: memSession?.pairingCode || '',
       updated_at: new Date().toISOString(),
     };
   }
 }
 
-export async function connectSession(tenantId = 'default') {
+export async function connectSession(tenantId = 'default', pairingPhoneNumber = null) {
   const existing = sessions.get(tenantId);
   if (existing && existing.sock && existing.status === 'connected') {
     return {
       status: 'connected',
       qr_code: '',
+      pairing_code: '',
       message: 'Session already connected.',
     };
   }
@@ -156,7 +159,7 @@ export async function connectSession(tenantId = 'default') {
       existing.sock.ev.removeAllListeners('connection.update');
       existing.sock.ev.removeAllListeners('creds.update');
       existing.sock.ev.removeAllListeners('messages.upsert');
-      existing.sock.end(new Error('Starting new session'));
+      existing.sock.end(undefined);
     } catch {}
     sessions.delete(tenantId);
   }
@@ -168,6 +171,7 @@ export async function connectSession(tenantId = 'default') {
   const sessionObj = {
     sock: null,
     qrCode: '',
+    pairingCode: '',
     status: 'connecting',
     phoneNumber: '',
   };
@@ -175,10 +179,10 @@ export async function connectSession(tenantId = 'default') {
 
   try {
     await db.query(
-      `INSERT INTO whatsapp_sessions (tenant_id, status, qr_code)
-       VALUES (?, 'connecting', NULL)
-       ON DUPLICATE KEY UPDATE status = 'connecting'`,
-      [tenantId]
+      `INSERT INTO whatsapp_sessions (tenant_id, status, qr_code, pairing_code)
+       VALUES (?, 'connecting', NULL, NULL)
+       ON DUPLICATE KEY UPDATE status = 'connecting', qr_code = NULL, pairing_code = NULL`,
+       [tenantId]
     );
   } catch (err) {
     console.warn('[DB Warning] could not update status to connecting:', err.message);
@@ -200,10 +204,50 @@ export async function connectSession(tenantId = 'default') {
 
   sock.ev.on('creds.update', saveCreds);
 
+  const cleanPairingPhone = pairingPhoneNumber ? String(pairingPhoneNumber).replace(/\D/g, '') : '';
+
+  // 🔢 Request Pairing Code if phone number is provided and device is not yet registered
+  if (cleanPairingPhone && !sock.authState.creds.registered) {
+    setTimeout(async () => {
+      try {
+        console.log(`[WhatsApp] Requesting Pairing Code for phone: ${cleanPairingPhone}...`);
+        const code = await sock.requestPairingCode(cleanPairingPhone);
+        sessionObj.pairingCode = code;
+        sessionObj.status = 'pairing_ready';
+
+        try {
+          await db.query(
+            `UPDATE whatsapp_sessions SET status = 'pairing_ready', pairing_code = ? WHERE tenant_id = ?`,
+            [code, tenantId]
+          );
+        } catch (dbErr) {
+          console.error('[DB Pairing Update Error]', dbErr.message);
+        }
+
+        await setRedisKey(`whatsapp:live:${tenantId}`, {
+          status: 'pairing_ready',
+          pairing_code: code,
+          timestamp: Date.now(),
+        }, 120);
+
+        await publishEvent('whatsapp:events', {
+          tenant_id: tenantId,
+          type: 'pairing_ready',
+          pairing_code: code,
+        });
+
+        console.log(`[WhatsApp] Pairing Code generated: ${code}`);
+      } catch (pairErr) {
+        console.error('[Pairing Code Error]', pairErr.message);
+      }
+    }, 3000);
+  }
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    // Only set QR code if pairing code was not requested
+    if (qr && !cleanPairingPhone) {
       try {
         const qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 6 });
         sessionObj.qrCode = qrDataUrl;
@@ -243,6 +287,7 @@ export async function connectSession(tenantId = 'default') {
 
       sessionObj.status = 'disconnected';
       sessionObj.qrCode = '';
+      sessionObj.pairingCode = '';
 
       await deleteRedisKey(`whatsapp:live:${tenantId}`);
 
@@ -261,7 +306,7 @@ export async function connectSession(tenantId = 'default') {
         try {
           await db.query(
             `UPDATE whatsapp_sessions
-             SET status = 'disconnected', qr_code = NULL
+             SET status = 'disconnected', qr_code = NULL, pairing_code = NULL
              WHERE tenant_id = ?`,
             [tenantId]
           );
@@ -285,12 +330,13 @@ export async function connectSession(tenantId = 'default') {
 
       sessionObj.status = 'connected';
       sessionObj.qrCode = '';
+      sessionObj.pairingCode = '';
       sessionObj.phoneNumber = phone;
 
       try {
         await db.query(
           `UPDATE whatsapp_sessions
-           SET status = 'connected', qr_code = NULL, phone_number = ?, profile_name = ?, connected_at = CURRENT_TIMESTAMP
+           SET status = 'connected', qr_code = NULL, pairing_code = NULL, phone_number = ?, profile_name = ?, connected_at = CURRENT_TIMESTAMP
            WHERE tenant_id = ?`,
           [phone, name, tenantId]
         );

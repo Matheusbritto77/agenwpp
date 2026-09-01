@@ -8,6 +8,14 @@ import pino from 'pino';
 import { useMySQLAuthState, clearSessionCredentials } from '../db/mysql-auth-state.js';
 import { getDbPool } from '../db/connection.js';
 import { logWhatsAppEvent } from '../db/logger.js';
+import {
+  parseSpintax,
+  isKnownInvalidNumber,
+  markNumberAsInvalid,
+  calculateTypingDuration,
+  getHumanDelayMs,
+  sleep,
+} from './anti-ban.js';
 import { publishEvent, setRedisKey, deleteRedisKey } from '../redis/client.js';
 
 const sessions = new Map(); // tenantId -> { sock, qrCode, status, phoneNumber }
@@ -153,7 +161,7 @@ export async function connectSession(tenantId = 'default') {
     version,
     logger,
     auth: state,
-    browser: ['Agendae Admin', 'Chrome', '1.0.0'],
+    browser: ['Windows', 'Chrome', '128.0.6613.120'],
     markOnlineOnConnect: false,
     syncFullHistory: false,
     connectTimeoutMs: 60000,
@@ -405,6 +413,30 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
     };
   }
 
+  // 🛡️ Anti-Ban: Check if number is in blacklist cache of non-existent numbers
+  if (isKnownInvalidNumber(cleanNumber)) {
+    const errorMsg = `[Anti-Ban] O número ${cleanNumber} não possui conta ativa no WhatsApp. Disparo cancelado para proteger o chip.`;
+    console.warn(errorMsg);
+    logWhatsAppEvent({
+      tenantId,
+      direction: 'outbound',
+      phone: cleanNumber,
+      status: 'failed',
+      messageBody: body,
+      errorMessage: errorMsg,
+      metadata: { idempotencyKey, anti_ban_blocked: true },
+    }).catch(() => {});
+
+    return {
+      message_id: '',
+      status: 'failed',
+      error: errorMsg,
+    };
+  }
+
+  // 💬 Anti-Ban: Dynamic Spintax Resolver to prevent sending identical texts in batch
+  const finalBody = parseSpintax(body);
+
   let targetJid = cleanNumber.includes('@') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`;
 
   // 📱 Detect Self-Chat / Mensagem para si mesmo (número próprio)
@@ -425,16 +457,19 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
     console.log(`[WhatsApp] Self-message detected! Sending directly to own JID: ${targetJid}`);
   } else {
     // 🔎 Automatically query WhatsApp server for the exact registered JID (handling Brazilian 9th digit)
+    let exists = false;
     try {
       const check = await sessionObj.sock.onWhatsApp(cleanNumber);
       if (check && check.length > 0 && check[0].exists) {
         targetJid = check[0].jid;
+        exists = true;
       } else if (cleanNumber.startsWith('55') && cleanNumber.length === 13) {
         // Try without 9th digit (55 + DDD + 8 digits)
         const without9 = cleanNumber.slice(0, 4) + cleanNumber.slice(5);
         const checkWithout9 = await sessionObj.sock.onWhatsApp(without9);
         if (checkWithout9 && checkWithout9.length > 0 && checkWithout9[0].exists) {
           targetJid = checkWithout9[0].jid;
+          exists = true;
         }
       } else if (cleanNumber.startsWith('55') && cleanNumber.length === 12) {
         // Try with 9th digit (55 + DDD + 9 + 8 digits)
@@ -442,17 +477,53 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
         const checkWith9 = await sessionObj.sock.onWhatsApp(with9);
         if (checkWith9 && checkWith9.length > 0 && checkWith9[0].exists) {
           targetJid = checkWith9[0].jid;
+          exists = true;
         }
+      }
+
+      // 🛡️ Anti-Ban: If number definitively does not exist on WhatsApp, cache and reject to prevent ban
+      if (!exists) {
+        markNumberAsInvalid(cleanNumber);
+        const notFoundMsg = `O número ${cleanNumber} não possui conta ativa no WhatsApp.`;
+        logWhatsAppEvent({
+          tenantId,
+          direction: 'outbound',
+          phone: cleanNumber,
+          status: 'failed',
+          messageBody: finalBody,
+          errorMessage: notFoundMsg,
+          metadata: { idempotencyKey, not_on_whatsapp: true },
+        }).catch(() => {});
+
+        return {
+          message_id: '',
+          status: 'failed',
+          error: notFoundMsg,
+        };
       }
     } catch (checkErr) {
       console.warn('[onWhatsApp check warning]', checkErr.message);
     }
   }
 
-  console.log(`[WhatsApp] Sending message to ${targetJid} (tenant: ${tenantId}, isSelf: ${isSelf}): "${body}"`);
+  // 🛡️ Anti-Ban: Humanized Presence Simulation (Simular "Digitando..." por 1.2s - 3.2s)
+  if (!isSelf) {
+    try {
+      await sessionObj.sock.sendPresenceUpdate('composing', targetJid);
+      const typingDuration = calculateTypingDuration(finalBody);
+      await sleep(typingDuration);
+      await sessionObj.sock.sendPresenceUpdate('paused', targetJid);
+      await sleep(250); // Small realistic pause between typing and hitting send
+    } catch (presenceErr) {
+      // Non-fatal if presence update fails
+      console.warn('[Presence Update Warning]', presenceErr.message);
+    }
+  }
+
+  console.log(`[WhatsApp] Sending message to ${targetJid} (tenant: ${tenantId}, isSelf: ${isSelf}): "${finalBody}"`);
 
   try {
-    const result = await sessionObj.sock.sendMessage(targetJid, { text: body });
+    const result = await sessionObj.sock.sendMessage(targetJid, { text: finalBody });
     const messageId = result?.key?.id || idempotencyKey || `${Date.now()}`;
     console.log(`[WhatsApp] Message successfully delivered to server! ID: ${messageId}`);
 
@@ -462,9 +533,15 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
       phone: cleanNumber,
       status: 'sent',
       messageId,
-      messageBody: body,
+      messageBody: finalBody,
       metadata: { targetJid, isSelf, idempotencyKey },
     }).catch(() => {});
+
+    // 🛡️ Anti-Ban: Human delay spacing before resolving (prevents rapid bursts)
+    if (!isSelf) {
+      const delay = getHumanDelayMs();
+      await sleep(delay);
+    }
 
     return {
       message_id: messageId,
@@ -480,7 +557,7 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
       direction: 'outbound',
       phone: cleanNumber,
       status: 'failed',
-      messageBody: body,
+      messageBody: finalBody,
       errorMessage: err.message || 'Failed to send message',
       metadata: { targetJid, isSelf, idempotencyKey },
     }).catch(() => {});

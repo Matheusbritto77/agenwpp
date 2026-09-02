@@ -15,6 +15,7 @@ Guia completo de variáveis de ambiente para deploy e execução local do micros
 | `DB_USERNAME` | String | `mysql` | Usuário do MySQL. |
 | `DB_PASSWORD` | String | `""` | Senha do usuário do MySQL. |
 | `REDIS_URL` | String | `redis://127.0.0.1:6379` | URL de conexão com o Redis para eventos em tempo real e fila. |
+| `AGENDAE_WEBHOOK_URL` | String | `http://127.0.0.1:8000/api/webhooks/whatsapp/inbound` | URL da API do Agendae para processar respostas interativas (ex: SIM/NAO). |
 | `LOG_LEVEL` | String | `info` | Nível de log (`fatal`, `error`, `warn`, `info`, `debug`, `trace`). |
 
 ---
@@ -34,6 +35,9 @@ DB_PASSWORD=9tlLfZDeRAb7v1noxlCe
 
 # Redis
 REDIS_URL=redis://default:4tyz8V2cjAHsmQ5rOkTM@agenda-wppreddis-qykpeh:6379
+
+# Webhook do Agendae para Aprovações Interativas SIM/NAO
+AGENDAE_WEBHOOK_URL=http://agenda-backend:8000/api/webhooks/whatsapp/inbound
 
 # Log
 LOG_LEVEL=info

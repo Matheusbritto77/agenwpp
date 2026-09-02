@@ -378,7 +378,7 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
   });
 
   sock.ev.on('messages.upsert', async (m) => {
-    // Log inbound messages to database
+    // Log and process inbound messages
     for (const msg of m.messages || []) {
       if (msg.key?.fromMe) continue;
       const senderJid = msg.key?.remoteJid || '';
@@ -395,6 +395,34 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           messageBody: text,
           metadata: { pushName: msg.pushName || null, jid: senderJid },
         }).catch(() => {});
+
+        // 🚀 Forward to Laravel Inbound Webhook for SIM/NAO appointment approval
+        const webhookUrl = process.env.AGENDAE_WEBHOOK_URL || 'http://127.0.0.1:8000/api/webhooks/whatsapp/inbound';
+        try {
+          const res = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: JSON.stringify({
+              tenant_id: tenantId,
+              phone: senderPhone,
+              message: text,
+              message_id: msg.key?.id,
+            }),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.reply) {
+              console.log(`[WhatsApp Inbound] Sending automated response to ${senderJid}: "${data.reply}"`);
+              await sock.sendMessage(senderJid, { text: data.reply });
+            }
+          }
+        } catch (webhookErr) {
+          console.warn('[WhatsApp Inbound Webhook Warning]', webhookErr.message);
+        }
       }
     }
 

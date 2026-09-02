@@ -455,6 +455,17 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           metadata: { pushName: msg.pushName || null, jid: senderJid, contextInfo },
         }).catch(() => {});
 
+        // 📌 Extract appointment ID if available in text or quoted text
+        let extractedApptId = null;
+        if (text) {
+          const directMatch = text.match(/#(\d+)/);
+          if (directMatch && directMatch[1]) extractedApptId = parseInt(directMatch[1], 10);
+        }
+        if (!extractedApptId && contextInfo?.quotedText) {
+          const quotedMatch = contextInfo.quotedText.match(/#(\d+)/);
+          if (quotedMatch && quotedMatch[1]) extractedApptId = parseInt(quotedMatch[1], 10);
+        }
+
         // ⚡ Direct Interactive Approval (Instant SIM/NAO handling in MySQL & immediate WhatsApp reply)
         processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId, contextInfo).catch((err) => {
           console.warn('[Direct Interactive Approval Error]', err.message);
@@ -466,6 +477,8 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           type: 'message_received',
           phone: senderPhone,
           message: text,
+          appointment_id: extractedApptId,
+          context_info: contextInfo,
           message_id: msg.key?.id,
           push_name: msg.pushName || null,
           jid: senderJid,

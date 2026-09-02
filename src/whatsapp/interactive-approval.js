@@ -266,7 +266,7 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
       return { action: 'rejected', appointmentId: appointment.id };
     }
   } catch (err) {
-    console.error('[Interactive Approval Error]', err.message);
+    console.warn('[Direct DB Notice] MySQL cross-db update delegated to Laravel Event Listener:', err.message);
   }
 
   return null;

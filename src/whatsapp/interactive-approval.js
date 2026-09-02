@@ -1,4 +1,4 @@
-import { getDbPool } from '../db/mysql-auth-state.js';
+import { getDbPool } from '../db/connection.js';
 
 /**
  * Directly process interactive SIM/NAO WhatsApp replies in MySQL with zero delay

@@ -432,6 +432,9 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
     const customUrl = process.env.ADMIN_HTTP_URL || process.env.ADMINAGENDA_URL;
     const candidateUrls = [
       customUrl,
+      'http://agenda-admin-cduyik/api/whatsapp/inbound-event',
+      'http://agenda-admin-cduyik:80/api/whatsapp/inbound-event',
+      'http://agenda-admin-cduyik-e3defc-209-126-81-68.sslip.io/api/whatsapp/inbound-event',
       'http://agenda-admin/api/whatsapp/inbound-event',
       'http://agenda-admin:80/api/whatsapp/inbound-event',
       'http://adminagenda/api/whatsapp/inbound-event',
@@ -448,14 +451,18 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(3500),
+          signal: AbortSignal.timeout(4000),
         });
         if (res.ok) {
-          console.log(`[Admin Dispatch] Successfully dispatched inbound event to ${url}`);
+          const json = await res.json().catch(() => ({}));
+          console.log(`[Admin Dispatch] Successfully dispatched to ${url}!`, json);
           return true;
+        } else {
+          console.warn(`[Admin Dispatch] HTTP ${res.status} from ${url}`);
         }
       } catch {}
     }
+    console.warn('[Admin Dispatch] Could not reach AdminAgenda on candidate URLs. Set ADMIN_HTTP_URL in env.');
     return false;
   }
 

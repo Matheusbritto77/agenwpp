@@ -557,7 +557,7 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
     const messageId = result?.key?.id || idempotencyKey || `${Date.now()}`;
     console.log(`[WhatsApp] Message successfully delivered to server! ID: ${messageId}`);
 
-    logWhatsAppEvent({
+    await logWhatsAppEvent({
       tenantId,
       direction: 'outbound',
       phone: cleanNumber,
@@ -565,7 +565,7 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
       messageId,
       messageBody: finalBody,
       metadata: { targetJid, isSelf, idempotencyKey },
-    }).catch(() => {});
+    });
 
     // 🛡️ Anti-Ban: Human delay spacing before resolving (prevents rapid bursts)
     if (!isSelf) {
@@ -582,7 +582,7 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
   } catch (err) {
     console.error(`[WhatsApp] Send message error to ${targetJid}:`, err.message);
 
-    logWhatsAppEvent({
+    await logWhatsAppEvent({
       tenantId,
       direction: 'outbound',
       phone: cleanNumber,
@@ -590,7 +590,7 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
       messageBody: finalBody,
       errorMessage: err.message || 'Failed to send message',
       metadata: { targetJid, isSelf, idempotencyKey },
-    }).catch(() => {});
+    });
 
     return {
       message_id: '',

@@ -378,14 +378,38 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
     }
   });
 
+  function extractMessageText(msg) {
+    if (!msg?.message) return '';
+    const m = msg.message.ephemeralMessage?.message
+      || msg.message.viewOnceMessage?.message
+      || msg.message.documentWithCaptionMessage?.message
+      || msg.message;
+
+    return m.conversation
+      || m.extendedTextMessage?.text
+      || m.imageMessage?.caption
+      || m.videoMessage?.caption
+      || m.buttonsResponseMessage?.selectedButtonId
+      || m.templateButtonReplyMessage?.selectedId
+      || m.listResponseMessage?.singleSelectReply?.selectedRowId
+      || '';
+  }
+
   sock.ev.on('messages.upsert', async (m) => {
     // Log and process inbound messages
     for (const msg of m.messages || []) {
-      if (msg.key?.fromMe) continue;
       const senderJid = msg.key?.remoteJid || '';
-      if (!senderJid || senderJid.includes('@g.us')) continue; // Skip group messages
-      const senderPhone = senderJid.split('@')[0];
-      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+      if (!senderJid || senderJid.includes('@g.us') || senderJid === 'status@broadcast') continue; // Skip groups & status
+
+      const myJid = sessionObj.sock?.user?.id ? jidNormalizedUser(sessionObj.sock.user.id) : '';
+      const isSelfChat = myJid && (senderJid === myJid || senderJid.startsWith(myJid.split('@')[0]));
+
+      // If fromMe is true, only allow if it is a self-chat test
+      if (msg.key?.fromMe && !isSelfChat) continue;
+
+      const senderPhone = senderJid.split('@')[0].split(':')[0];
+      const text = extractMessageText(msg);
+
       if (text) {
         logWhatsAppEvent({
           tenantId,

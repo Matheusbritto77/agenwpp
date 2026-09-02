@@ -378,6 +378,23 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
     }
   });
 
+  function extractMessageText(msg) {
+    if (!msg?.message) return '';
+    const m = msg.message.ephemeralMessage?.message
+      || msg.message.viewOnceMessage?.message
+      || msg.message.documentWithCaptionMessage?.message
+      || msg.message;
+
+    return m.conversation
+      || m.extendedTextMessage?.text
+      || m.imageMessage?.caption
+      || m.videoMessage?.caption
+      || m.buttonsResponseMessage?.selectedButtonId
+      || m.templateButtonReplyMessage?.selectedId
+      || m.listResponseMessage?.singleSelectReply?.selectedRowId
+      || '';
+  }
+
   function extractMessageContext(msg) {
     if (!msg?.message) return {};
     const m = msg.message.ephemeralMessage?.message

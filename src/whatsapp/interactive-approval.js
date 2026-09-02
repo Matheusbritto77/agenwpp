@@ -154,21 +154,8 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
       if (candRows && candRows.length > 0) appointment = candRows[0];
     }
 
-    // 4. Fallback: most recent pending appointment
     if (!appointment) {
-      const [fallbackRows] = await db.query(
-        `SELECT a.*, s.name as service_name, u.name as company_name
-         FROM ${p}appointments a
-         LEFT JOIN ${p}services s ON s.id = a.service_id
-         LEFT JOIN ${p}users u ON u.id = a.user_id
-         WHERE a.status = 'pending'
-         ORDER BY a.id DESC LIMIT 1`
-      );
-      if (fallbackRows && fallbackRows.length > 0) appointment = fallbackRows[0];
-    }
-
-    if (!appointment) {
-      console.warn(`[Interactive Approval] No pending appointment found for response from ${cleanPhone}`);
+      console.log(`[Interactive Approval] No specific pending appointment matches response from ${cleanPhone}. Doing nothing.`);
       return null;
     }
 

@@ -378,21 +378,37 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
     }
   });
 
-  function extractMessageText(msg) {
-    if (!msg?.message) return '';
+  function extractMessageContext(msg) {
+    if (!msg?.message) return {};
     const m = msg.message.ephemeralMessage?.message
       || msg.message.viewOnceMessage?.message
       || msg.message.documentWithCaptionMessage?.message
       || msg.message;
 
-    return m.conversation
-      || m.extendedTextMessage?.text
-      || m.imageMessage?.caption
-      || m.videoMessage?.caption
-      || m.buttonsResponseMessage?.selectedButtonId
-      || m.templateButtonReplyMessage?.selectedId
-      || m.listResponseMessage?.singleSelectReply?.selectedRowId
-      || '';
+    const contextInfo = m.extendedTextMessage?.contextInfo
+      || m.imageMessage?.contextInfo
+      || m.videoMessage?.contextInfo
+      || m.buttonsResponseMessage?.contextInfo
+      || null;
+
+    if (!contextInfo) return {};
+
+    const quotedMsg = contextInfo.quotedMessage;
+    let quotedText = '';
+    if (quotedMsg) {
+      const qm = quotedMsg.ephemeralMessage?.message || quotedMsg.viewOnceMessage?.message || quotedMsg;
+      quotedText = qm.conversation
+        || qm.extendedTextMessage?.text
+        || qm.imageMessage?.caption
+        || qm.videoMessage?.caption
+        || '';
+    }
+
+    return {
+      quotedStanzaId: contextInfo.stanzaId || null,
+      quotedParticipant: contextInfo.participant || null,
+      quotedText,
+    };
   }
 
   sock.ev.on('messages.upsert', async (m) => {
@@ -409,6 +425,7 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
 
       const senderPhone = senderJid.split('@')[0].split(':')[0];
       const text = extractMessageText(msg);
+      const contextInfo = extractMessageContext(msg);
 
       if (text) {
         logWhatsAppEvent({
@@ -418,11 +435,11 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           status: 'received',
           messageId: msg.key?.id,
           messageBody: text,
-          metadata: { pushName: msg.pushName || null, jid: senderJid },
+          metadata: { pushName: msg.pushName || null, jid: senderJid, contextInfo },
         }).catch(() => {});
 
         // ⚡ Direct Interactive Approval (Instant SIM/NAO handling in MySQL & immediate WhatsApp reply)
-        processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId).catch((err) => {
+        processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId, contextInfo).catch((err) => {
           console.warn('[Direct Interactive Approval Error]', err.message);
         });
 

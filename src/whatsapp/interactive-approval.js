@@ -3,7 +3,7 @@ import { getDbPool } from '../db/connection.js';
 /**
  * Directly process interactive SIM/NAO WhatsApp replies in MySQL with zero delay
  */
-export async function processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId = 'default') {
+export async function processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId = 'default', contextInfo = {}) {
   if (!text || typeof text !== 'string') return null;
 
   const rawMessage = text.trim();
@@ -28,15 +28,24 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
     return null; // Not an approval/rejection command
   }
 
+  // 📌 If user quoted/marked the notification message, extract Appointment ID from quoted text
+  if (!appointmentId && contextInfo?.quotedText) {
+    const quotedMatch = contextInfo.quotedText.match(/#(\d+)/);
+    if (quotedMatch && quotedMatch[1]) {
+      appointmentId = parseInt(quotedMatch[1], 10);
+      console.log(`[Interactive Approval] Extracted Appointment #${appointmentId} directly from Quoted Message!`);
+    }
+  }
+
   const cleanPhone = senderPhone.replace(/\D/g, '');
   const db = getDbPool();
 
-  console.log(`[Interactive Approval] Intent detected: ${isApproval ? 'APPROVE' : 'REJECT'} from ${cleanPhone} ("${rawMessage}")`);
+  console.log(`[Interactive Approval] Intent detected: ${isApproval ? 'APPROVE' : 'REJECT'} from ${cleanPhone} ("${rawMessage}") | Appointment: ${appointmentId || 'Auto-detect'}`);
 
   try {
     let appointment = null;
 
-    // 1. If explicit appointment ID provided
+    // 1. If explicit appointment ID provided or extracted from quote
     if (appointmentId) {
       const [rows] = await db.query(
         `SELECT a.*, s.name as service_name, u.name as company_name

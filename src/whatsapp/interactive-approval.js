@@ -49,14 +49,19 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
   if (!text || typeof text !== 'string') return null;
 
   const rawMessage = text.trim();
-  const cleanedText = rawMessage.replace(/[^\p{L}\p{N}\s#]/gu, '');
+  const cleanedText = rawMessage.replace(/[^\p{L}\p{N}\s#]/gu, '').trim();
+
+  // 🛑 Anti-Loop Guard: Commands are short ("SIM", "SIM 37", "NAO"). Long messages (like receipts) are NEVER commands!
+  if (cleanedText.length > 25) {
+    return null;
+  }
 
   let isApproval = false;
   let isRejection = false;
   let appointmentId = null;
 
-  const matchApproval = cleanedText.match(/^(?:SIM|S|APROVAR|CONFIRMAR|CONFIRMADO|OK|1)\b(?:\s*#?(\d+))?/i);
-  const matchRejection = cleanedText.match(/^(?:NAO|NÃO|N|RECUSAR|CANCELAR|CANCELADO|2)\b(?:\s*#?(\d+))?/i);
+  const matchApproval = cleanedText.match(/^(?:SIM|S|APROVAR|OK|1)\b(?:\s*#?(\d+))?$/i);
+  const matchRejection = cleanedText.match(/^(?:NAO|NÃO|N|RECUSAR|CANCELAR|2)\b(?:\s*#?(\d+))?$/i);
 
   if (matchApproval) {
     isApproval = true;
@@ -165,6 +170,12 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
     if (!appointment) {
       console.warn(`[Interactive Approval] No pending appointment found for response from ${cleanPhone}`);
       return null;
+    }
+
+    // 🛑 Anti-Loop Guard: If already confirmed/cancelled, STOP immediately!
+    if (appointment.status !== 'pending') {
+      console.log(`[Interactive Approval] Appointment #${appointment.id} is already in status '${appointment.status}'. Halting duplicate execution.`);
+      return { action: 'already_processed', appointmentId: appointment.id };
     }
 
     const serviceName = appointment.service_name || 'Serviço';

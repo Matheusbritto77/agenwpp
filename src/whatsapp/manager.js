@@ -21,6 +21,16 @@ import { publishEvent, setRedisKey, deleteRedisKey } from '../redis/client.js';
 import { processInteractiveApproval } from './interactive-approval.js';
 
 const sessions = new Map(); // tenantId -> { sock, qrCode, status, phoneNumber }
+const sentMessageIds = new Set();
+
+function trackSentMessage(id) {
+  if (!id) return;
+  sentMessageIds.add(id);
+  if (sentMessageIds.size > 1000) {
+    const first = sentMessageIds.values().next().value;
+    sentMessageIds.delete(first);
+  }
+}
 
 // 🤫 Completely disable Baileys internal pino logger output to prevent raw JSON traces
 const logger = pino({
@@ -475,6 +485,9 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
       const myJid = sessionObj.sock?.user?.id ? jidNormalizedUser(sessionObj.sock.user.id) : '';
       const isSelfChat = myJid && (senderJid === myJid || senderJid.startsWith(myJid.split('@')[0]));
 
+      // 🛑 Anti-Loop Guard 1: Skip any message sent by the bot itself
+      if (msg.key?.id && sentMessageIds.has(msg.key.id)) continue;
+
       // If fromMe is true, only allow if it is a self-chat test
       if (msg.key?.fromMe && !isSelfChat) continue;
 
@@ -493,40 +506,44 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           metadata: { pushName: msg.pushName || null, jid: senderJid, contextInfo },
         }).catch(() => {});
 
-        // 📌 Extract appointment ID if available in text or quoted text
-        let extractedApptId = null;
-        if (text) {
+        // 🛑 Anti-Loop Guard 2: System messages, receipts, and notifications are NEVER commands!
+        const isSystemMessage = /^[✅🚨🎉🚫]/.test(text.trim()) || text.startsWith('Olá') || text.trim().length > 25;
+
+        if (!isSystemMessage) {
+          // 📌 Extract appointment ID if available in text or quoted text
+          let extractedApptId = null;
           const directMatch = text.match(/#(\d+)/);
           if (directMatch && directMatch[1]) extractedApptId = parseInt(directMatch[1], 10);
+
+          if (!extractedApptId && contextInfo?.quotedText) {
+            const quotedMatch = contextInfo.quotedText.match(/#(\d+)/);
+            if (quotedMatch && quotedMatch[1]) extractedApptId = parseInt(quotedMatch[1], 10);
+          }
+
+          // ⚡ Direct Interactive Approval (Instant SIM/NAO handling in MySQL & immediate WhatsApp reply)
+          processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId, contextInfo).catch((err) => {
+            console.warn('[Direct Interactive Approval Error]', err.message);
+          });
+
+          const inboundPayload = {
+            tenant_id: tenantId,
+            type: 'message_received',
+            phone: senderPhone,
+            message: text,
+            appointment_id: extractedApptId,
+            context_info: contextInfo,
+            message_id: msg.key?.id,
+            push_name: msg.pushName || null,
+            jid: senderJid,
+            timestamp: Date.now(),
+          };
+
+          // 📡 1. Publish to Redis & gRPC stream for background event listeners
+          await publishEvent('whatsapp:events', inboundPayload);
+
+          // 🚀 2. Direct HTTP Dispatch to AdminAgenda API for synchronous execution
+          dispatchInboundEventToAdmin(inboundPayload).catch(() => {});
         }
-        if (!extractedApptId && contextInfo?.quotedText) {
-          const quotedMatch = contextInfo.quotedText.match(/#(\d+)/);
-          if (quotedMatch && quotedMatch[1]) extractedApptId = parseInt(quotedMatch[1], 10);
-        }
-
-        // ⚡ Direct Interactive Approval (Instant SIM/NAO handling in MySQL & immediate WhatsApp reply)
-        processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId, contextInfo).catch((err) => {
-          console.warn('[Direct Interactive Approval Error]', err.message);
-        });
-
-        const inboundPayload = {
-          tenant_id: tenantId,
-          type: 'message_received',
-          phone: senderPhone,
-          message: text,
-          appointment_id: extractedApptId,
-          context_info: contextInfo,
-          message_id: msg.key?.id,
-          push_name: msg.pushName || null,
-          jid: senderJid,
-          timestamp: Date.now(),
-        };
-
-        // 📡 1. Publish to Redis & gRPC stream for background event listeners
-        await publishEvent('whatsapp:events', inboundPayload);
-
-        // 🚀 2. Direct HTTP Dispatch to AdminAgenda API for synchronous execution
-        dispatchInboundEventToAdmin(inboundPayload).catch(() => {});
       }
     }
 
@@ -745,6 +762,7 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
   try {
     const result = await sessionObj.sock.sendMessage(targetJid, { text: finalBody });
     const messageId = result?.key?.id || idempotencyKey || `${Date.now()}`;
+    trackSentMessage(messageId);
     console.log(`[WhatsApp] Message successfully delivered to server! ID: ${messageId}`);
 
     await logWhatsAppEvent({

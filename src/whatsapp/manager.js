@@ -428,6 +428,37 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
     };
   }
 
+  async function dispatchInboundEventToAdmin(payload) {
+    const customUrl = process.env.ADMIN_HTTP_URL || process.env.ADMINAGENDA_URL;
+    const candidateUrls = [
+      customUrl,
+      'http://agenda-admin/api/whatsapp/inbound-event',
+      'http://agenda-admin:80/api/whatsapp/inbound-event',
+      'http://adminagenda/api/whatsapp/inbound-event',
+      'http://127.0.0.1/api/whatsapp/inbound-event',
+      'http://127.0.0.1:8080/api/whatsapp/inbound-event',
+      'http://localhost/api/whatsapp/inbound-event',
+      'http://localhost:8080/api/whatsapp/inbound-event',
+      'http://host.docker.internal/api/whatsapp/inbound-event',
+    ].filter(Boolean);
+
+    for (const url of candidateUrls) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(3500),
+        });
+        if (res.ok) {
+          console.log(`[Admin Dispatch] Successfully dispatched inbound event to ${url}`);
+          return true;
+        }
+      } catch {}
+    }
+    return false;
+  }
+
   sock.ev.on('messages.upsert', async (m) => {
     // Log and process inbound messages
     for (const msg of m.messages || []) {
@@ -471,8 +502,7 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           console.warn('[Direct Interactive Approval Error]', err.message);
         });
 
-        // 📡 Publish Inbound Message Event to gRPC & Redis channel for Laravel Event listeners
-        await publishEvent('whatsapp:events', {
+        const inboundPayload = {
           tenant_id: tenantId,
           type: 'message_received',
           phone: senderPhone,
@@ -483,7 +513,13 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           push_name: msg.pushName || null,
           jid: senderJid,
           timestamp: Date.now(),
-        });
+        };
+
+        // 📡 1. Publish to Redis & gRPC stream for background event listeners
+        await publishEvent('whatsapp:events', inboundPayload);
+
+        // 🚀 2. Direct HTTP Dispatch to AdminAgenda API for synchronous execution
+        dispatchInboundEventToAdmin(inboundPayload).catch(() => {});
       }
     }
 

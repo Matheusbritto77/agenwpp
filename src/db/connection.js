@@ -1,6 +1,31 @@
 import mysql from 'mysql2/promise';
 
 let pool = null;
+let agendaePool = null;
+
+export function getAgendaeDbPool() {
+  if (!agendaePool) {
+    const host = process.env.AGENDAE_DB_HOST || process.env.DB_HOST || '127.0.0.1';
+    const port = Number(process.env.AGENDAE_DB_PORT || process.env.DB_PORT || 3306);
+    const user = process.env.AGENDAE_DB_USERNAME || process.env.DB_USERNAME || 'root';
+    const password = process.env.AGENDAE_DB_PASSWORD ?? process.env.DB_PASSWORD ?? '';
+    const database = process.env.AGENDAE_DB_DATABASE || 'agendai';
+
+    agendaePool = mysql.createPool({
+      host,
+      port,
+      user,
+      password,
+      database,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 10000,
+    });
+  }
+  return agendaePool;
+}
 
 export function getDbPool() {
   if (!pool) {

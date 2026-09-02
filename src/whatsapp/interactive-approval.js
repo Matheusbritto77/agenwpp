@@ -1,4 +1,4 @@
-import { getDbPool } from '../db/connection.js';
+import { getDbPool, getAgendaeDbPool } from '../db/connection.js';
 
 let cachedDbName = null;
 
@@ -6,7 +6,17 @@ let cachedDbName = null;
  * Dynamically resolve the Agendae database name where appointments table lives
  */
 async function resolveAgendaeDatabase(db) {
-  if (cachedDbName) return cachedDbName;
+  if (cachedDbName !== null) return cachedDbName;
+
+  // First check if appointments table is directly accessible on current db
+  try {
+    const [rows] = await db.query(`SELECT 1 FROM appointments LIMIT 1`);
+    if (rows) {
+      cachedDbName = '';
+      console.log('[Interactive Approval] Appointments table accessible directly without schema prefix.');
+      return cachedDbName;
+    }
+  } catch {}
 
   const candidates = [
     process.env.AGENDAE_DB_DATABASE,
@@ -14,7 +24,6 @@ async function resolveAgendaeDatabase(db) {
     'agendae',
     'agenda',
     process.env.DB_DATABASE,
-    'adminagenda',
   ];
 
   for (const name of candidates) {
@@ -29,7 +38,7 @@ async function resolveAgendaeDatabase(db) {
     } catch {}
   }
 
-  cachedDbName = process.env.AGENDAE_DB_DATABASE || process.env.DB_DATABASE || 'agendae';
+  cachedDbName = process.env.AGENDAE_DB_DATABASE || 'agendai';
   return cachedDbName;
 }
 
@@ -71,10 +80,17 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
   }
 
   const cleanPhone = senderPhone.replace(/\D/g, '');
-  const db = getDbPool();
-  const agendaeDb = await resolveAgendaeDatabase(db);
+  let db = null;
+  try {
+    db = getAgendaeDbPool();
+  } catch {
+    db = getDbPool();
+  }
 
-  console.log(`[Interactive Approval] Intent: ${isApproval ? 'APPROVE' : 'REJECT'} from ${cleanPhone} ("${rawMessage}") | Target ID: ${appointmentId || 'Auto'} | DB: \`${agendaeDb}\``);
+  const agendaeDb = await resolveAgendaeDatabase(db);
+  const p = agendaeDb ? `\`${agendaeDb}\`.` : '';
+
+  console.log(`[Interactive Approval] Intent: ${isApproval ? 'APPROVE' : 'REJECT'} from ${cleanPhone} ("${rawMessage}") | Target ID: ${appointmentId || 'Auto'} | Prefix: "${p}"`);
 
   try {
     let appointment = null;
@@ -83,9 +99,9 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
     if (appointmentId) {
       const [rows] = await db.query(
         `SELECT a.*, s.name as service_name, u.name as company_name
-         FROM \`${agendaeDb}\`.appointments a
-         LEFT JOIN \`${agendaeDb}\`.services s ON s.id = a.service_id
-         LEFT JOIN \`${agendaeDb}\`.users u ON u.id = a.user_id
+         FROM ${p}appointments a
+         LEFT JOIN ${p}services s ON s.id = a.service_id
+         LEFT JOIN ${p}users u ON u.id = a.user_id
          WHERE a.id = ?`,
         [appointmentId]
       );
@@ -96,7 +112,7 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
     if (!appointment) {
       const last8 = cleanPhone.slice(-8);
       const [queueRows] = await db.query(
-        `SELECT appointment_id FROM \`${agendaeDb}\`.whatsapp_notification_queue
+        `SELECT appointment_id FROM ${p}whatsapp_notification_queue
          WHERE (recipient_phone LIKE ? OR recipient_phone LIKE ?)
            AND appointment_id IS NOT NULL
          ORDER BY id DESC LIMIT 1`,
@@ -106,9 +122,9 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
       if (queueRows && queueRows.length > 0 && queueRows[0].appointment_id) {
         const [candRows] = await db.query(
           `SELECT a.*, s.name as service_name, u.name as company_name
-           FROM \`${agendaeDb}\`.appointments a
-           LEFT JOIN \`${agendaeDb}\`.services s ON s.id = a.service_id
-           LEFT JOIN \`${agendaeDb}\`.users u ON u.id = a.user_id
+           FROM ${p}appointments a
+           LEFT JOIN ${p}services s ON s.id = a.service_id
+           LEFT JOIN ${p}users u ON u.id = a.user_id
            WHERE a.id = ? AND a.status = 'pending'`,
           [queueRows[0].appointment_id]
         );
@@ -121,10 +137,10 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
       const last8 = cleanPhone.slice(-8);
       const [candRows] = await db.query(
         `SELECT a.*, s.name as service_name, u.name as company_name
-         FROM \`${agendaeDb}\`.appointments a
-         LEFT JOIN \`${agendaeDb}\`.services s ON s.id = a.service_id
-         LEFT JOIN \`${agendaeDb}\`.users u ON u.id = a.user_id
-         LEFT JOIN \`${agendaeDb}\`.team_members tm ON tm.id = a.team_member_id
+         FROM ${p}appointments a
+         LEFT JOIN ${p}services s ON s.id = a.service_id
+         LEFT JOIN ${p}users u ON u.id = a.user_id
+         LEFT JOIN ${p}team_members tm ON tm.id = a.team_member_id
          WHERE a.status = 'pending'
            AND (u.phone LIKE ? OR u.phone LIKE ? OR tm.phone LIKE ? OR tm.phone LIKE ?)
          ORDER BY a.id DESC LIMIT 1`,
@@ -137,9 +153,9 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
     if (!appointment) {
       const [fallbackRows] = await db.query(
         `SELECT a.*, s.name as service_name, u.name as company_name
-         FROM \`${agendaeDb}\`.appointments a
-         LEFT JOIN \`${agendaeDb}\`.services s ON s.id = a.service_id
-         LEFT JOIN \`${agendaeDb}\`.users u ON u.id = a.user_id
+         FROM ${p}appointments a
+         LEFT JOIN ${p}services s ON s.id = a.service_id
+         LEFT JOIN ${p}users u ON u.id = a.user_id
          WHERE a.status = 'pending'
          ORDER BY a.id DESC LIMIT 1`
       );
@@ -167,12 +183,12 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
     // ==========================================
     if (isApproval) {
       // 1. Update appointment status to confirmed in Agendae DB
-      await db.query(`UPDATE \`${agendaeDb}\`.appointments SET status = 'confirmed' WHERE id = ?`, [appointment.id]);
+      await db.query(`UPDATE ${p}appointments SET status = 'confirmed' WHERE id = ?`, [appointment.id]);
 
       // 2. Insert flow log
       try {
         await db.query(
-          `INSERT INTO \`${agendaeDb}\`.appointment_flow_logs (user_id, appointment_id, event_type, level, channel, title, description, metadata, created_at)
+          `INSERT INTO ${p}appointment_flow_logs (user_id, appointment_id, event_type, level, channel, title, description, metadata, created_at)
            VALUES (?, ?, 'status_changed', 'success', 'whatsapp', 'Agendamento Aprovado via WhatsApp (Instant Engine)', ?, ?, NOW())`,
           [
             appointment.user_id,
@@ -191,7 +207,7 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
         
         try {
           await db.query(
-            `INSERT INTO \`${agendaeDb}\`.whatsapp_notification_queue (user_id, appointment_id, recipient_phone, recipient_name, message_type, message_body, status, scheduled_for, created_at, updated_at)
+            `INSERT INTO ${p}whatsapp_notification_queue (user_id, appointment_id, recipient_phone, recipient_name, message_type, message_body, status, scheduled_for, created_at, updated_at)
              VALUES (?, ?, ?, ?, 'confirmed', ?, 'pending', NOW(), NOW(), NOW())`,
             [appointment.user_id, appointment.id, appointment.client_phone, appointment.client_name, customerMsg]
           );
@@ -217,12 +233,12 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
     // 🔴 REJECTION ACTION (NAO)
     // ==========================================
     if (isRejection) {
-      await db.query(`UPDATE \`${agendaeDb}\`.appointments SET status = 'cancelled' WHERE id = ?`, [appointment.id]);
+      await db.query(`UPDATE ${p}appointments SET status = 'cancelled' WHERE id = ?`, [appointment.id]);
 
       // Cancel pending reminders
       try {
         await db.query(
-          `UPDATE \`${agendaeDb}\`.whatsapp_notification_queue SET status = 'cancelled' WHERE appointment_id = ? AND message_type = 'reminder' AND status = 'pending'`,
+          `UPDATE ${p}whatsapp_notification_queue SET status = 'cancelled' WHERE appointment_id = ? AND message_type = 'reminder' AND status = 'pending'`,
           [appointment.id]
         );
       } catch {}
@@ -230,7 +246,7 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
       // Insert flow log
       try {
         await db.query(
-          `INSERT INTO \`${agendaeDb}\`.appointment_flow_logs (user_id, appointment_id, event_type, level, channel, title, description, metadata, created_at)
+          `INSERT INTO ${p}appointment_flow_logs (user_id, appointment_id, event_type, level, channel, title, description, metadata, created_at)
            VALUES (?, ?, 'status_changed', 'danger', 'whatsapp', 'Agendamento Recusado via WhatsApp (Instant Engine)', ?, ?, NOW())`,
           [
             appointment.user_id,
@@ -247,7 +263,7 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
         
         try {
           await db.query(
-            `INSERT INTO \`${agendaeDb}\`.whatsapp_notification_queue (user_id, appointment_id, recipient_phone, recipient_name, message_type, message_body, status, scheduled_for, created_at, updated_at)
+            `INSERT INTO ${p}whatsapp_notification_queue (user_id, appointment_id, recipient_phone, recipient_name, message_type, message_body, status, scheduled_for, created_at, updated_at)
              VALUES (?, ?, ?, ?, 'cancelled', ?, 'pending', NOW(), NOW(), NOW())`,
             [appointment.user_id, appointment.id, appointment.client_phone, appointment.client_name, customerMsg]
           );

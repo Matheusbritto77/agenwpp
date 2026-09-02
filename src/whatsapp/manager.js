@@ -18,6 +18,7 @@ import {
   sleep,
 } from './anti-ban.js';
 import { publishEvent, setRedisKey, deleteRedisKey } from '../redis/client.js';
+import { processInteractiveApproval } from './interactive-approval.js';
 
 const sessions = new Map(); // tenantId -> { sock, qrCode, status, phoneNumber }
 
@@ -395,6 +396,11 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           messageBody: text,
           metadata: { pushName: msg.pushName || null, jid: senderJid },
         }).catch(() => {});
+
+        // ⚡ Direct Interactive Approval (Instant SIM/NAO handling in MySQL & immediate WhatsApp reply)
+        processInteractiveApproval(sock, senderPhone, text, senderJid, tenantId).catch((err) => {
+          console.warn('[Direct Interactive Approval Error]', err.message);
+        });
 
         // 📡 Publish Inbound Message Event to gRPC & Redis channel for Laravel Event listeners
         await publishEvent('whatsapp:events', {

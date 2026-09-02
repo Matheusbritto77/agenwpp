@@ -406,10 +406,66 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
   });
 
   return {
-    status: sessionObj.status,
-    qr_code: sessionObj.qrCode,
+    status: 'connecting',
     message: 'Connecting to WhatsApp...',
   };
+}
+
+const resolvedJidCache = new Map();
+
+async function resolveRegisteredJid(sock, cleanNumber) {
+  if (resolvedJidCache.has(cleanNumber)) {
+    return resolvedJidCache.get(cleanNumber);
+  }
+
+  // 1. Direct query
+  try {
+    const results = await sock.onWhatsApp(cleanNumber);
+    if (results && results.length > 0 && results[0]?.exists) {
+      const trueJid = results[0].jid;
+      resolvedJidCache.set(cleanNumber, trueJid);
+      return trueJid;
+    }
+  } catch (err) {
+    console.warn('[JID Resolution Warning]', err.message);
+  }
+
+  // 2. Brazilian 9th digit variation resolution
+  if (cleanNumber.startsWith('55')) {
+    // 13 digits (55 + DDD + 9 + 8 digits) -> Test 12 digits (without 9th digit)
+    if (cleanNumber.length === 13) {
+      const without9 = cleanNumber.slice(0, 4) + cleanNumber.slice(5);
+      try {
+        const results = await sock.onWhatsApp(without9);
+        if (results && results.length > 0 && results[0]?.exists) {
+          const trueJid = results[0].jid;
+          resolvedJidCache.set(cleanNumber, trueJid);
+          resolvedJidCache.set(without9, trueJid);
+          console.log(`[WhatsApp JID Resolved] ${cleanNumber} -> ${trueJid} (registered without 9th digit)`);
+          return trueJid;
+        }
+      } catch {}
+    }
+
+    // 12 digits (55 + DDD + 8 digits) -> Test 13 digits (with 9th digit)
+    if (cleanNumber.length === 12) {
+      const with9 = cleanNumber.slice(0, 4) + '9' + cleanNumber.slice(4);
+      try {
+        const results = await sock.onWhatsApp(with9);
+        if (results && results.length > 0 && results[0]?.exists) {
+          const trueJid = results[0].jid;
+          resolvedJidCache.set(cleanNumber, trueJid);
+          resolvedJidCache.set(with9, trueJid);
+          console.log(`[WhatsApp JID Resolved] ${cleanNumber} -> ${trueJid} (registered with 9th digit)`);
+          return trueJid;
+        }
+      } catch {}
+    }
+  }
+
+  // Fallback default format
+  const fallbackJid = cleanNumber.includes('@') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`;
+  return fallbackJid;
 }
 
 export async function disconnectSession(tenantId = 'default') {
@@ -534,6 +590,8 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
   if (isSelf && myJid) {
     targetJid = myJid;
     console.log(`[WhatsApp] Self-message detected! Sending directly to own JID: ${targetJid}`);
+  } else {
+    targetJid = await resolveRegisteredJid(sessionObj.sock, cleanNumber);
   }
 
   // 🛡️ Anti-Ban: Humanized Presence Simulation (Simular "Digitando..." por 1.2s - 3.2s)

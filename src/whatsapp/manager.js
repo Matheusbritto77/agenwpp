@@ -396,33 +396,17 @@ export async function connectSession(tenantId = 'default', pairingPhoneNumber = 
           metadata: { pushName: msg.pushName || null, jid: senderJid },
         }).catch(() => {});
 
-        // 🚀 Forward to Laravel Inbound Webhook for SIM/NAO appointment approval
-        const webhookUrl = process.env.AGENDAE_WEBHOOK_URL || 'http://127.0.0.1:8000/api/webhooks/whatsapp/inbound';
-        try {
-          const res = await fetch(webhookUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-            },
-            body: JSON.stringify({
-              tenant_id: tenantId,
-              phone: senderPhone,
-              message: text,
-              message_id: msg.key?.id,
-            }),
-          });
-
-          if (res.ok) {
-            const data = await res.json();
-            if (data?.reply) {
-              console.log(`[WhatsApp Inbound] Sending automated response to ${senderJid}: "${data.reply}"`);
-              await sock.sendMessage(senderJid, { text: data.reply });
-            }
-          }
-        } catch (webhookErr) {
-          console.warn('[WhatsApp Inbound Webhook Warning]', webhookErr.message);
-        }
+        // 📡 Publish Inbound Message Event to gRPC & Redis channel for Laravel Event listeners
+        await publishEvent('whatsapp:events', {
+          tenant_id: tenantId,
+          type: 'message_received',
+          phone: senderPhone,
+          message: text,
+          message_id: msg.key?.id,
+          push_name: msg.pushName || null,
+          jid: senderJid,
+          timestamp: Date.now(),
+        });
       }
     }
 

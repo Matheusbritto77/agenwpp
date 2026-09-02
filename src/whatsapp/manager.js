@@ -567,12 +567,6 @@ export async function sendMessage(tenantId = 'default', to, body, idempotencyKey
       metadata: { targetJid, isSelf, idempotencyKey },
     });
 
-    // 🛡️ Anti-Ban: Human delay spacing before resolving (prevents rapid bursts)
-    if (!isSelf) {
-      const delay = getHumanDelayMs();
-      await sleep(delay);
-    }
-
     return {
       message_id: messageId,
       status: 'sent',

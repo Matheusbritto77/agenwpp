@@ -58,10 +58,12 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
 
   let isApproval = false;
   let isRejection = false;
+  let isReschedule = false;
   let appointmentId = null;
 
   const matchApproval = cleanedText.match(/^(?:SIM|S|APROVAR|OK|1)\b(?:\s*#?(\d+))?$/i);
   const matchRejection = cleanedText.match(/^(?:NAO|NÃO|N|RECUSAR|CANCELAR|2)\b(?:\s*#?(\d+))?$/i);
+  const matchReschedule = cleanedText.match(/^(?:REMARCAR|REAGENDAR|REMARCA|3)\b(?:\s*#?(\d+))?$/i);
 
   if (matchApproval) {
     isApproval = true;
@@ -69,10 +71,13 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
   } else if (matchRejection) {
     isRejection = true;
     if (matchRejection[1]) appointmentId = parseInt(matchRejection[1], 10);
+  } else if (matchReschedule) {
+    isReschedule = true;
+    if (matchReschedule[1]) appointmentId = parseInt(matchReschedule[1], 10);
   }
 
-  if (!isApproval && !isRejection) {
-    return null; // Not an approval/rejection command
+  if (!isApproval && !isRejection && !isReschedule) {
+    return null; // Not an approval/rejection/reschedule command
   }
 
   // 📌 If user quoted/marked the notification message, extract Appointment ID from quoted text
@@ -278,6 +283,73 @@ export async function processInteractiveApproval(sock, senderPhone, text, sender
       console.log(`[Interactive Approval] Appointment #${appointment.id} REJECTED! Receipt sent to ${senderJid}`);
 
       return { action: 'rejected', appointmentId: appointment.id };
+    }
+
+    // ==========================================
+    // 🔄 RESCHEDULE ACTION (REMARCAR)
+    // ==========================================
+    if (isReschedule) {
+      await db.query(
+        `UPDATE ${p}appointments SET status = 'cancelled', notes = CONCAT(COALESCE(notes, ''), ' [Remarcação solicitada via WhatsApp]') WHERE id = ?`,
+        [appointment.id]
+      );
+
+      // Cancel pending reminders
+      try {
+        await db.query(
+          `UPDATE ${p}whatsapp_notification_queue SET status = 'cancelled' WHERE appointment_id = ? AND message_type = 'reminder' AND status = 'pending'`,
+          [appointment.id]
+        );
+      } catch {}
+
+      const publicBaseUrl = process.env.APP_PUBLIC_URL || 'https://agenda-app-d2lmgn-e3defc-209-126-81-68.sslip.io';
+      const bookingUrl = appointment.subdomain ? `${publicBaseUrl}/${appointment.subdomain}` : publicBaseUrl;
+
+      // Insert flow log
+      try {
+        await db.query(
+          `INSERT INTO ${p}appointment_flow_logs (user_id, appointment_id, event_type, level, channel, title, description, metadata, created_at)
+           VALUES (?, ?, 'status_changed', 'warning', 'whatsapp', 'Agendamento - Remarcação Solicitada via WhatsApp', ?, ?, NOW())`,
+          [
+            appointment.user_id,
+            appointment.id,
+            `O profissional respondeu 'REMARCAR' no WhatsApp. O cliente ${appointment.client_name} foi convidado a escolher um novo horário.`,
+            JSON.stringify({ phone: cleanPhone, raw_message: rawMessage, new_status: 'cancelled', booking_url: bookingUrl }),
+          ]
+        );
+      } catch {}
+
+      // Enqueue Customer Reschedule Notification
+      if (appointment.client_phone) {
+        const customerMsg = `🔄 *Solicitação de Remarcação - ${companyName}*\n\n`
+          + `Olá, ${appointment.client_name}! ✨\n\n`
+          + `O estabelecimento informou que precisará remarcar o seu agendamento inicial:\n`
+          + `📅 *Data anterior:* ${formattedDate} às ${formattedTime}\n`
+          + `✂️ *Serviço:* ${serviceName}\n\n`
+          + `👉 *Por favor, escolha um novo dia e horário de sua preferência no link abaixo:*\n`
+          + `🔗 ${bookingUrl}\n\n`
+          + `Agradecemos muito pela compreensão!`;
+        
+        try {
+          await db.query(
+            `INSERT INTO ${p}whatsapp_notification_queue (user_id, appointment_id, recipient_phone, recipient_name, message_type, message_body, status, scheduled_for, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'cancelled', ?, 'pending', NOW(), NOW(), NOW())`,
+            [appointment.user_id, appointment.id, appointment.client_phone, appointment.client_name, customerMsg]
+          );
+        } catch {}
+      }
+
+      // Send Reschedule Receipt to the sender
+      const receiptText = `🔄 *Solicitação de Remarcação Enviada!*\n\n`
+        + `👤 *Cliente:* ${appointment.client_name}\n`
+        + `📅 *Agendamento:* #${appointment.id}\n\n`
+        + `📲 Enviamos uma mensagem no WhatsApp do cliente com o link da sua empresa para que ele escolha um novo horário:\n`
+        + `🔗 ${bookingUrl}`;
+
+      await sock.sendMessage(senderJid, { text: receiptText });
+      console.log(`[Interactive Approval] Appointment #${appointment.id} RESCHEDULE requested! Receipt sent to ${senderJid}`);
+
+      return { action: 'rescheduled', appointmentId: appointment.id, bookingUrl };
     }
   } catch (err) {
     console.warn('[Direct DB Notice] MySQL cross-db update delegated to Laravel Event Listener:', err.message);
